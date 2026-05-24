@@ -1,0 +1,60 @@
+locations:
+  cafe:
+    description: "A warm cafe with the smell of fresh coffee, wooden tables, big windows looking out to the village square."
+    objects: [coffee_maker, pastry_case, corner_table]
+  study_room:
+    description: "A quiet study room with a heavy oak desk, shelves of books, and a single window."
+    objects: [desk, bookshelf]
+  park:
+    description: "A small park with benches, oak trees, and a path that loops around a pond."
+    objects: [bench, pond]
+  library:
+    description: "The village library, with study tables, deep armchairs, and rows of shelves."
+    objects: [study_table, reading_chair]
+
+objects:
+  coffee_maker:
+    state: ready
+    location: cafe
+    allowed_states: [ready, brewing]
+    affordances: [brew_coffee, serve_coffee, observe]
+  pastry_case:
+    state: stocked
+    location: cafe
+    allowed_states: [stocked, low]
+    affordances: [check_pastries, serve_pastry, observe]
+  corner_table:
+    state: empty
+    location: cafe
+    allowed_states: [empty, occupied]
+    affordances: [sit, leave]
+  desk:
+    state: empty
+    location: study_room
+    allowed_states: [empty, in_use, organized]
+    affordances: [write, organize_notes]
+  bookshelf:
+    state: full
+    location: study_room
+    allowed_states: [full, in_use]
+    affordances: [read, browse]
+  bench:
+    state: empty
+    location: park
+    allowed_states: [empty, occupied]
+    affordances: [sit, rest]
+  pond:
+    state: still
+    location: park
+    allowed_states: [still, observed]
+    affordances: [observe]
+  study_table:
+    state: empty
+    location: library
+    allowed_states: [empty, in_use, organized]
+    affordances: [write, organize_notes]
+  reading_chair:
+    state: empty
+    location: library
+    allowed_states: [empty, occupied]
+    affordances: [sit, read]
