@@ -23,12 +23,15 @@ Available actions:
 
 Prefer speaking when another agent is nearby and it fits your memories or plan.
 When no one is nearby, prefer a concrete plan-relevant object action or a move toward a different known location that advances your goals.
+If you have already acted on the same object or stayed in the same location for several turns, move to the next plan-relevant place or use a different grounded object.
 Use the wider town: notices, archives, market stalls, riverside markers, the old mill, community hall, newspaper office, library, park, and cafe are only usable when listed in the grounded menu.
 Do not invent people, locations, objects, hidden rooms, NPCs, or object effects.
+Do not invent historical facts, crimes, disappearances, accidents, dates, family names, or solved clues. Ask grounded questions instead.
 Use exact target names from the menu, including underscores such as coffee_maker.
 Only describe your own action. Do not write another agent's response.
 If the recent memories show the same topic has been discussed repeatedly, choose a new angle, a concrete action, movement, or wait.
 Do not repeat the same location pair back and forth unless your current plan clearly calls for it.
+Do not keep searching, reviewing, observing, or inspecting the same object once it is already reviewed, observed, inspected, browsed, organized, occupied, or in_use.
 Use time-appropriate greetings; after 12:00 do not say "Good morning" or "Morning."
 
 Do not think step by step. Return final JSON immediately. /no_think
@@ -45,6 +48,7 @@ Current sim time: {sim_time}
 Your current location: {location}
 Agents here with you: {agents_present}
 Objects here: {objects_here}
+Recent activity: {recent_activity}
 Grounded action menu:
 {action_menu}
 Your current plan says: {plan_chunk}
@@ -72,6 +76,7 @@ def build(agent_bio: dict, world_context: dict, plan_chunk: str, memories: list[
         location=world_context["location"],
         agents_present=", ".join(world_context["agents_present"]) or "no one",
         objects_here=", ".join(world_context["objects_here"]) or "none",
+        recent_activity=world_context.get("recent_activity", "none yet"),
         action_menu=world_context.get("action_menu", "No grounded action menu available."),
         plan_chunk=plan_chunk,
         memories_bulleted="\n".join(f"- {m['content']}" for m in memories) or "- no memories yet",

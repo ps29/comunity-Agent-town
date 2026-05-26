@@ -53,9 +53,12 @@ class Agent:
         self._last_end_of_day_key: str | None = None
         self._recent_messages: list[str] = []
         self._recent_reflections: list[str] = []
+        self._recent_locations: list[str] = []
+        self._recent_action_keys: list[str] = []
 
     async def perceive(self, sim_tick: int, sim_time: str) -> list[dict]:
         location = self.world.agent_location(self.bio["name"])
+        self._remember_location(location)
         agents_here = [a for a in self.world.agents_at(location) if a != self.bio["name"]]
         objects_here = self.world.objects_at(location)
         recent_events = self.bus.events_at_location_for_tick(location, sim_tick - 1)
@@ -144,7 +147,7 @@ class Agent:
             },
         )
         result = await self.gateway.call(CallKind.PLAN, system, user, self.bio["name"])
-        self.current_plan = result.get("schedule") or self._fallback_plan()
+        self.current_plan = self._sanitize_plan(result.get("schedule") or self._fallback_plan())
         if self.agent_files:
             self.agent_files.write_today(self.bio, self.current_plan, sim_time)
         if self.plan_repo:
@@ -182,13 +185,17 @@ class Agent:
                 "objects_here": self.world.objects_at(location),
                 "all_locations": list(self.world.locations.keys()),
                 "action_menu": format_action_menu(action_menu),
+                "recent_activity": self._recent_activity_summary(),
             },
             plan_chunk,
             memories,
         )
         result = await self.gateway.call(CallKind.ACT, system, user, self.bio["name"])
         proposal = self._proposal_from_dict(result, agents_here, self.world.objects_at(location), location, plan_chunk, sim_time)
-        return self._avoid_repetitive_speech(proposal, objects_here=self.world.objects_at(location), location=location, plan_chunk=plan_chunk)
+        proposal = self._avoid_repetitive_speech(proposal, objects_here=self.world.objects_at(location), location=location, plan_chunk=plan_chunk)
+        proposal = self._avoid_stale_action(proposal, objects_here=self.world.objects_at(location), agents_here=agents_here, location=location, plan_chunk=plan_chunk, sim_time=sim_time)
+        self._remember_action(proposal)
+        return proposal
 
     def _build_budgeted_action_prompt(self, world_context: dict, plan_chunk: str, memories: list[dict]) -> tuple[str, str, list[dict]]:
         kept = list(memories)
@@ -354,6 +361,21 @@ class Agent:
             or self.current_plan.get(f"hour_{hour}")
             or self.current_plan.get(hour)
             or "(no specific plan for this hour)"
+        )
+
+    def _next_plan_chunk(self, sim_time: str) -> str:
+        if not self.current_plan:
+            return ""
+        try:
+            hour = int(sim_time.split(":", 1)[0])
+        except (TypeError, ValueError):
+            return ""
+        next_hour = f"{hour + 1:02d}"
+        return (
+            self.current_plan.get(f"{next_hour}:00")
+            or self.current_plan.get(f"hour_{next_hour}")
+            or self.current_plan.get(str(hour + 1))
+            or ""
         )
 
     def _fallback_observation(self, location: str, agents_here: list[str], objects_here: list[str]) -> str:
@@ -552,8 +574,12 @@ class Agent:
             ("stall", "browse_market"),
             ("meeting", "host_meeting"),
             ("host", "host_meeting"),
+            ("type", "write_article"),
+            ("typing", "write_article"),
             ("article", "write_article"),
             ("newspaper", "write_article"),
+            ("draft", "write_article"),
+            ("drafting", "write_article"),
             ("write", "write"),
             ("notebook", "write"),
             ("organize", "organize_notes"),
@@ -633,14 +659,37 @@ class Agent:
             return message
         for name in self.world.agent_positions:
             if name != target and message.startswith(f"{name},"):
-                return f"{target}," + message[len(name) + 1:]
-        return message
+                message = f"{target}," + message[len(name) + 1:]
+                break
+        if target == "John":
+            message = re.sub(r"\bthesis\b", "novel notes", message, flags=re.IGNORECASE)
+        elif target == "Emma":
+            message = re.sub(r"\bnovel\b", "research", message, flags=re.IGNORECASE)
+        return self._ground_historical_claims(message)
 
     def _fallback_message_for_target(self, target: str | None, sim_time: str) -> str:
         if not target:
             return "I am nearby and paying attention."
         message = f"Hello, {target}. How is your day going?"
         return self._sanitize_message_for_time(message, sim_time)
+
+    def _ground_historical_claims(self, message: str) -> str:
+        replacements = [
+            (r"\bold miller[’']?s disappearance\b", "the old mill records"),
+            (r"\bdisappearance\b", "open question"),
+            (r"\baccidents?\b", "river notes"),
+            (r"\blate 1880s\b", "older records"),
+            (r"\b18\d{2}s\b", "older records"),
+            (r"\bworkers there\b", "people connected with the mill"),
+            (r"\bmissing (cat|tabby|pet|garden gnome|gnome)\b", "odd notice"),
+            (r"\bginger tabby named [A-Z][a-zA-Z']+\b", "odd notice"),
+            (r"\b(Pip|Marmalade)\b", "the notice"),
+            (r"\bgarden gnome\b", "odd clipping"),
+            (r"\bdisturbed plants\b", "town_square notes"),
+        ]
+        for pattern, replacement in replacements:
+            message = re.sub(pattern, replacement, message, flags=re.IGNORECASE)
+        return message
 
     def _avoid_repetitive_speech(self, proposal, objects_here: list[str], location: str, plan_chunk: str):
         if not isinstance(proposal, SpeakProposal):
@@ -660,6 +709,117 @@ class Agent:
                 return UseObjectProposal(self.bio["name"], obj, affordance)
         return WaitProposal(self.bio["name"], "Let the conversation breathe instead of repeating the same point.")
 
+    def _avoid_stale_action(self, proposal, objects_here: list[str], agents_here: list[str], location: str, plan_chunk: str, sim_time: str):
+        plan_location = self._location_from_text(plan_chunk)
+        if plan_location and plan_location != location and self._has_lingered(location, ticks=2):
+            return MoveProposal(self.bio["name"], plan_location)
+
+        if isinstance(proposal, UseObjectProposal):
+            action_key = self._action_key(proposal)
+            if self._is_repeated_action(action_key) or self._object_use_would_be_noop(proposal):
+                alternate = self._alternate_object_action(proposal.object, objects_here)
+                if alternate:
+                    return alternate
+                next_location = self._next_plan_location(sim_time, exclude=location) or self._fresh_location(exclude=location)
+                if next_location and (not agents_here or self._is_repeated_action(action_key)):
+                    return MoveProposal(self.bio["name"], next_location)
+
+        if isinstance(proposal, WaitProposal):
+            if self._has_lingered(location, ticks=3):
+                next_location = self._next_plan_location(sim_time, exclude=location) or self._fresh_location(exclude=location)
+                if next_location:
+                    return MoveProposal(self.bio["name"], next_location)
+
+        return proposal
+
+    def _object_use_would_be_noop(self, proposal: UseObjectProposal) -> bool:
+        current = self.world.get_object_state(proposal.object)
+        expected = {
+            "brew_coffee": "brewing",
+            "serve_coffee": "ready",
+            "serve_pastry": "stocked",
+            "check_pastries": "stocked",
+            "sit": "occupied",
+            "leave": "empty",
+            "write": "in_use",
+            "organize_notes": "organized",
+            "read": "in_use",
+            "browse": "in_use",
+            "rest": "occupied",
+            "observe": "observed",
+            "read_notice": "reviewed",
+            "post_notice": "posted",
+            "search_records": "reviewed",
+            "study_map": "reviewed",
+            "inspect": "inspected",
+            "browse_market": "browsed",
+            "host_meeting": "in_use",
+            "write_article": "in_use",
+            "review_notes": "reviewed",
+        }.get(proposal.interaction)
+        return bool(expected and current == expected)
+
+    def _alternate_object_action(self, current_object: str, objects_here: list[str]):
+        for obj in objects_here:
+            if obj == current_object:
+                continue
+            if self.world.get_object_state(obj) in {"reviewed", "observed", "inspected", "browsed", "organized", "occupied", "in_use"}:
+                continue
+            affordance = self._default_affordance(obj)
+            if affordance:
+                return UseObjectProposal(self.bio["name"], obj, affordance)
+        return None
+
+    def _next_plan_location(self, sim_time: str, exclude: str = "") -> str | None:
+        for text in (self._next_plan_chunk(sim_time), " ".join((self.current_plan or {}).values())):
+            location = self._location_from_text(text)
+            if location and location != exclude:
+                return location
+        return None
+
+    def _fresh_location(self, exclude: str = "") -> str | None:
+        preferred = self.bio.get("preferences", {}).get("places", [])
+        candidates = list(preferred) + list(self.world.locations.keys())
+        recent = set(self._recent_locations[-4:])
+        for location in candidates:
+            if location in self.world.locations and location != exclude and location not in recent:
+                return location
+        for location in candidates:
+            if location in self.world.locations and location != exclude:
+                return location
+        return None
+
+    def _has_lingered(self, location: str, ticks: int) -> bool:
+        return len(self._recent_locations) >= ticks and all(loc == location for loc in self._recent_locations[-ticks:])
+
+    def _remember_location(self, location: str) -> None:
+        self._recent_locations.append(location)
+        self._recent_locations = self._recent_locations[-8:]
+
+    def _remember_action(self, proposal) -> None:
+        self._recent_action_keys.append(self._action_key(proposal))
+        self._recent_action_keys = self._recent_action_keys[-8:]
+
+    def _action_key(self, proposal) -> str:
+        if isinstance(proposal, MoveProposal):
+            return f"move:{proposal.target_location}"
+        if isinstance(proposal, SpeakProposal):
+            terms = " ".join(sorted(self._message_terms(proposal.message))[:6])
+            return f"speak:{proposal.target}:{terms}"
+        if isinstance(proposal, UseObjectProposal):
+            return f"use:{proposal.object}:{proposal.interaction}"
+        if isinstance(proposal, WaitProposal):
+            return "wait"
+        return "unknown"
+
+    def _is_repeated_action(self, action_key: str) -> bool:
+        return self._recent_action_keys[-4:].count(action_key) >= 1
+
+    def _recent_activity_summary(self) -> str:
+        locations = ", ".join(self._recent_locations[-4:]) or "none yet"
+        actions = ", ".join(self._recent_action_keys[-4:]) or "none yet"
+        return f"recent_locations=[{locations}]; recent_actions=[{actions}]"
+
     def _remember_message(self, message: str) -> None:
         self._recent_messages.append(message)
         self._recent_messages = self._recent_messages[-8:]
@@ -672,6 +832,7 @@ class Agent:
         topic_terms = {
             "silas", "gatherings", "square", "river", "spirits", "folklore", "henderson", "sketches", "croissant",
             "higgins", "mill", "miller", "daughter", "espresso", "artwork", "david", "history", "thesis",
+            "civic", "notices", "notice", "board", "levels", "water", "rain", "stories", "records", "research",
         }
         topic_hits = normalized & topic_terms
         if len(topic_hits) >= 2:
@@ -945,6 +1106,21 @@ class Agent:
     def _looks_like_raw_plan(self, content: str) -> bool:
         stripped = content.strip()
         return stripped.startswith("{") and ("hour_" in stripped or '"08:00"' in stripped or "'08:00'" in stripped)
+
+    def _sanitize_plan(self, plan: dict) -> dict:
+        if not isinstance(plan, dict):
+            return self._fallback_plan()
+        cleaned = {}
+        for key, value in plan.items():
+            text = str(value)
+            text = re.sub(r"\b(Mr|Mrs|Ms|Miss|Dr)\.\s+[A-Z][a-zA-Z']+\b", "regulars", text)
+            text = re.sub(r"\b(flower_stall|market_stalls)\s+vendor\b", r"\1", text, flags=re.IGNORECASE)
+            text = re.sub(r"\bchat with (the )?vendors\b", "browse_market", text, flags=re.IGNORECASE)
+            text = re.sub(r"\bchat with (the )?neighbors\b", "browse_market", text, flags=re.IGNORECASE)
+            text = re.sub(r"\bregular customer\b", "regular cafe routine", text, flags=re.IGNORECASE)
+            text = self._ground_historical_claims(text)
+            cleaned[str(key)] = self._truncate_text(text, 260)
+        return cleaned or self._fallback_plan()
 
     def _compact_soul(self, text: str) -> str:
         lines = []

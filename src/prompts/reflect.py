@@ -1,11 +1,18 @@
 SYSTEM_TEMPLATE = """\
-You are {name}. Reflect on recent memories and infer useful high-level insights. Do not think step by step. /no_think
+You are {name}. Reflect on recent memories and infer useful high-level insights. Stay evidence-bound. Do not think step by step. /no_think
 
 Character capsule:
 {character_capsule}
 Live agent files:
 {file_context}
 Respond with valid JSON.
+
+Rules:
+- Only write an insight when at least two recent memories support it, or when one concrete event is clearly important.
+- Do not turn ordinary repeated object states into mysteries.
+- Do not invent historical facts, crimes, disappearances, accidents, dates, or solved clues.
+- If memories show repetition or getting stuck, say that plainly and suggest a grounded next kind of action.
+- Durable knowledge facts must be modest facts, not theories.
 
 Example:
 {{"insights":["John seems more open to conversation when people ask about his writing routine."],"knowledge":["John values thoughtful questions about his writing routine."]}}
@@ -15,7 +22,7 @@ USER_TEMPLATE = """\
 Recent memories:
 {memories}
 
-Generate 1 to 3 insights and 0 to 3 concise durable knowledge facts. JSON only.
+Generate 0 to 2 insights and 0 to 2 concise durable knowledge facts. JSON only.
 """
 
 

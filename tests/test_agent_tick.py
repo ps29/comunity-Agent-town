@@ -337,6 +337,116 @@ def test_agent_same_location_move_waits_instead_of_emitting_noop_move():
     assert proposal.reason == "Already at the planned location."
 
 
+def test_agent_sanitizes_plan_unlisted_people():
+    bio = {"id": 1, "name": "Maria", "age": 28, "job": "owner", "personality": "Warm", "goals": []}
+    world = WorldState({"cafe": {"objects": []}, "market_stalls": {"objects": []}}, {})
+    world.place_agent("Maria", "cafe")
+    world.place_agent("John", "cafe")
+    world.place_agent("Emma", "cafe")
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+
+    plan = agent._sanitize_plan(
+        {"hour_09": "Serve Mr. Henderson coffee, then ask Mrs. Davies about flowers before seeing John."}
+    )
+
+    assert "Henderson" not in plan["hour_09"]
+    assert "Davies" not in plan["hour_09"]
+    assert "John" in plan["hour_09"]
+    assert "Serve" in plan["hour_09"]
+
+
+def test_agent_rewrites_cross_character_role_mixups():
+    bio = {"id": 1, "name": "Maria", "age": 28, "job": "owner", "personality": "Warm", "goals": []}
+    world = WorldState({"cafe": {"objects": []}}, {})
+    world.place_agent("Maria", "cafe")
+    world.place_agent("John", "cafe")
+    world.place_agent("Emma", "cafe")
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+
+    assert "thesis" not in agent._sanitize_message_for_target("John, how is the thesis?", "John").lower()
+    assert "novel" not in agent._sanitize_message_for_target("Emma, how is the novel?", "Emma").lower()
+    assert "disappearance" not in agent._sanitize_message_for_target("Emma, what about the old miller's disappearance?", "Emma").lower()
+    assert "garden gnome" not in agent._sanitize_message_for_target("Maria, I saw a missing garden gnome notice.", "Maria").lower()
+
+
+def test_agent_moves_to_plan_location_after_lingering():
+    bio = {
+        "id": 1,
+        "name": "Emma",
+        "age": 26,
+        "job": "researcher",
+        "personality": "Curious",
+        "goals": [],
+    }
+    world = WorldState(
+        {"library": {"objects": ["local_history_shelf"]}, "archive_room": {"objects": ["archive_boxes"]}},
+        {
+            "local_history_shelf": {
+                "state": "reviewed",
+                "location": "library",
+                "affordances": ["search_records"],
+                "allowed_states": ["full", "reviewed"],
+            },
+            "archive_boxes": {
+                "state": "untouched",
+                "location": "archive_room",
+                "affordances": ["search_records"],
+                "allowed_states": ["untouched", "reviewed"],
+            },
+        },
+    )
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+    agent.current_plan = {"hour_11": "Move to the archive_room and search archive_boxes."}
+    agent._recent_locations = ["library", "library"]
+
+    proposal = agent._avoid_stale_action(
+        UseObjectProposal("Emma", "local_history_shelf", "search_records"),
+        objects_here=["local_history_shelf"],
+        agents_here=[],
+        location="library",
+        plan_chunk="Move to the archive_room and search archive_boxes.",
+        sim_time="11:00",
+    )
+
+    assert isinstance(proposal, MoveProposal)
+    assert proposal.target_location == "archive_room"
+
+
+def test_agent_uses_alternate_object_when_action_would_noop():
+    bio = {"id": 1, "name": "John", "age": 32, "job": "writer", "personality": "Quiet", "goals": []}
+    world = WorldState(
+        {"newspaper_office": {"objects": ["clippings_wall", "reporter_notebook"]}},
+        {
+            "clippings_wall": {
+                "state": "reviewed",
+                "location": "newspaper_office",
+                "affordances": ["review_notes"],
+                "allowed_states": ["posted", "reviewed"],
+            },
+            "reporter_notebook": {
+                "state": "closed",
+                "location": "newspaper_office",
+                "affordances": ["write", "review_notes"],
+                "allowed_states": ["closed", "in_use", "reviewed"],
+            },
+        },
+    )
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+
+    proposal = agent._avoid_stale_action(
+        UseObjectProposal("John", "clippings_wall", "review_notes"),
+        objects_here=["clippings_wall", "reporter_notebook"],
+        agents_here=[],
+        location="newspaper_office",
+        plan_chunk="Review clippings and draft notes.",
+        sim_time="12:00",
+    )
+
+    assert isinstance(proposal, UseObjectProposal)
+    assert proposal.object == "reporter_notebook"
+    assert proposal.interaction == "review_notes"
+
+
 def test_agent_retargets_sitting_at_non_seat_to_nearby_seat():
     bio = {"id": 1, "name": "John", "age": 32, "job": "writer", "personality": "Quiet", "goals": []}
     world = WorldState(

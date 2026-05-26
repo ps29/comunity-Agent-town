@@ -2,6 +2,6 @@ llama_cpp_url: "http://localhost:8080/v1"
 primary_model: "gemma3-4b"
 cheap_model: "gemma3-4b"
 tick_duration_sim_seconds: 1800
-reflection_threshold: 25
+reflection_threshold: 35
 plan_interval_ticks: 48
 random_seed: 42
