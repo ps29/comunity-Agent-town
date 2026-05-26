@@ -15,7 +15,7 @@ Goals:
 Known world:
 {known_world}
 
-Create a simple daily plan for today using only known locations, people, and objects from context. Respond with valid JSON whose "schedule" maps hour keys to intentions. Do not think step by step. /no_think
+Create a simple daily plan for today using only known locations, people, and objects from context. Include entries for hours 08 through 17. Respond with valid JSON whose "schedule" maps hour keys to intentions. Do not think step by step. /no_think
 
 Example:
 {{"schedule":{{"hour_08":"Open the cafe and make coffee.","hour_09":"Chat with regulars at the cafe."}}}}
@@ -26,7 +26,7 @@ Current time: {sim_time}
 Recent reflections:
 {reflections}
 
-Create schedule entries for hours 08 through 12. JSON only.
+Create schedule entries for hours 08 through 17. JSON only.
 """
 
 

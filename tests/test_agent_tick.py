@@ -9,7 +9,7 @@ from src.cognition.memory import MemoryService
 from src.llm.gateway import CallKind
 from src.storage.db import get_connection, init_db
 from src.storage.repositories import AgentRepository, MemoryRepository
-from src.world.events import EventBus
+from src.world.events import EventBus, SpeechEvent
 from src.world.state import WorldState
 from tests.test_memory import TinyEmbeddings
 
@@ -115,6 +115,15 @@ def test_normalize_observation_dict_booleans():
     assert agent._normalize_observation({"desk_is_clear": True, "ignored": False}) == "desk is clear"
 
 
+def test_agent_reads_clock_style_plan_keys():
+    bio = {"id": 1, "name": "Maria", "age": 28, "job": "cafe owner", "personality": "Warm", "goals": []}
+    world = WorldState({"cafe": {"objects": []}}, {})
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+    agent.current_plan = {"08:00": "Open the cafe.", "hour_09": "Welcome guests."}
+    assert agent._current_plan_chunk("08:00") == "Open the cafe."
+    assert agent._current_plan_chunk("09:30") == "Welcome guests."
+
+
 def test_agent_normalizes_common_object_action_near_misses():
     bio = {"id": 1, "name": "Maria", "age": 28, "job": "cafe owner", "personality": "Warm", "goals": []}
     world = WorldState(
@@ -129,6 +138,23 @@ def test_agent_normalizes_common_object_action_near_misses():
     assert isinstance(proposal, UseObjectProposal)
     assert proposal.object == "coffee_maker"
     assert proposal.interaction == "brew_coffee"
+
+
+def test_agent_maps_notebook_to_nearby_writing_surface():
+    bio = {"id": 1, "name": "John", "age": 32, "job": "novelist", "personality": "Quiet", "goals": []}
+    world = WorldState(
+        {"study_room": {"objects": ["desk"]}},
+        {"desk": {"state": "empty", "location": "study_room", "affordances": ["write"], "allowed_states": ["empty", "in_use"]}},
+    )
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+    proposal = agent._proposal_from_dict(
+        {"action": "use_object", "target": "notebook", "interaction": "I open the notebook and begin writing."},
+        objects_here=["desk"],
+        location="study_room",
+    )
+    assert isinstance(proposal, UseObjectProposal)
+    assert proposal.object == "desk"
+    assert proposal.interaction == "write"
 
 
 def test_agent_redirects_non_nearby_object_use_to_object_location():
@@ -177,6 +203,28 @@ def test_agent_sanitizes_afternoon_greeting_and_avoids_repeated_message():
     assert repeated.interaction == "sit"
 
 
+def test_agent_fallback_uses_grounded_need_action_before_waiting():
+    bio = {"id": 1, "name": "Maria", "age": 28, "job": "cafe owner", "personality": "Warm", "goals": []}
+    world = WorldState(
+        {"cafe": {"objects": ["pastry_case", "coffee_maker"]}},
+        {
+            "pastry_case": {"state": "stocked", "location": "cafe", "affordances": ["serve_pastry"], "allowed_states": ["stocked"]},
+            "coffee_maker": {"state": "ready", "location": "cafe", "affordances": ["serve_coffee"], "allowed_states": ["ready"]},
+        },
+    )
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+    agent.needs.hunger = 0.9
+    proposal = agent._proposal_from_dict(
+        {"action": "wait", "fallback": True},
+        objects_here=["pastry_case", "coffee_maker"],
+        location="cafe",
+        sim_time="15:00",
+    )
+    assert isinstance(proposal, UseObjectProposal)
+    assert proposal.object == "pastry_case"
+    assert proposal.interaction == "serve_pastry"
+
+
 def test_agent_deterministic_perception_uses_world_state_only():
     bio = {"id": 1, "name": "Maria", "age": 28, "job": "cafe owner", "personality": "Warm", "goals": []}
     world = WorldState(
@@ -187,8 +235,78 @@ def test_agent_deterministic_perception_uses_world_state_only():
     world.place_agent("Emma", "cafe")
     agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
     observations = agent._deterministic_observations("cafe", ["Emma"], ["coffee_maker"], [])
-    assert observations[0] == "Maria is at the cafe with Emma; nearby objects include coffee_maker."
+    assert observations[0] == "I am at the cafe with Emma; nearby objects include coffee_maker."
     assert "coffee_maker is ready" in observations[-1]
+
+
+def test_agent_remembers_incoming_speech_for_repetition_filter():
+    bio = {"id": 1, "name": "Maria", "age": 28, "job": "cafe owner", "personality": "Warm", "goals": []}
+    world = WorldState({"cafe": {"objects": ["corner_table"]}}, {"corner_table": {"state": "empty", "location": "cafe", "affordances": ["sit"], "allowed_states": ["empty", "occupied"]}})
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+    event = SpeechEvent("Emma", "Maria", "cafe", "That espresso is fantastic. Do you remember Mrs. Higgins and the old mill?", 1)
+    agent._deterministic_observations("cafe", ["Emma"], ["corner_table"], [event])
+    repeated = SpeakProposal("Maria", "Emma", "That espresso is fantastic. Do you remember Mrs. Higgins and the old mill?")
+    proposal = agent._avoid_repetitive_speech(repeated, ["corner_table"], "cafe", "")
+    assert isinstance(proposal, UseObjectProposal)
+
+
+def test_agent_filters_ungrounded_legacy_file_context():
+    bio = {"id": 1, "name": "Maria", "age": 28, "job": "cafe owner", "personality": "Warm", "goals": []}
+    world = WorldState({"cafe": {"objects": []}}, {})
+    world.place_agent("Maria", "cafe")
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+
+    grounded = agent._ground_agent_file_text(
+        "# Knowledge\n"
+        "- Emma likes coffee.\n"
+        "- Silas told stories by the river.\n"
+        "- Mr. Henderson owns the bakery near the village square.\n"
+        "- The back room contains artisan sketches.\n"
+    )
+
+    assert "Emma likes coffee" in grounded
+    assert "Silas" not in grounded
+    assert "Henderson" not in grounded
+    assert "artisan" not in grounded
+
+
+def test_agent_compacts_action_memories_and_excludes_raw_plans():
+    bio = {"id": 1, "name": "Emma", "age": 26, "job": "student", "personality": "Curious", "goals": []}
+    world = WorldState({"cafe": {"objects": []}}, {})
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+    memories = [
+        {"kind": "plan", "content": '{"hour_08":"Visit cafe","hour_09":"Repeat"}'},
+        {"kind": "dialogue", "content": "Maria said: " + "coffee " * 100},
+        {"kind": "dialogue", "content": "Maria said: " + "coffee " * 100},
+        {"kind": "reflection", "content": "Emma keeps returning to the cafe for research."},
+        {"kind": "observation", "content": "The coffee_maker is ready."},
+    ]
+    compact = agent._memories_for_action_prompt(memories)
+    assert len(compact) == 3
+    assert all(memory["kind"] != "plan" for memory in compact)
+    assert all(len(memory["content"]) <= 240 for memory in compact)
+
+
+def test_agent_budgeted_action_prompt_stays_under_cap():
+    bio = {"id": 1, "name": "Emma", "age": 26, "job": "student", "personality": "Curious", "goals": ["Research"]}
+    world = WorldState({"cafe": {"objects": ["coffee_maker"]}}, {"coffee_maker": {"state": "ready", "location": "cafe"}})
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+    bio["character_capsule"] = "curious"
+    bio["file_context"] = "Knowledge:\n" + ("very long context " * 1000)
+    memories = [{"content": "memory " * 200, "kind": "observation"} for _ in range(12)]
+    system, user, kept = agent._build_budgeted_action_prompt(
+        {
+            "sim_time": "10:00",
+            "location": "cafe",
+            "agents_present": [],
+            "objects_here": ["coffee_maker"],
+            "action_menu": "Valid use_object targets:\n- coffee_maker state=ready affordances=[observe]",
+        },
+        "Observe the cafe.",
+        memories,
+    )
+    assert len(system) + len(user) <= 12000
+    assert len(kept) < len(memories)
 
 
 def test_agent_move_to_nearby_object_becomes_object_use():

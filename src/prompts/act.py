@@ -9,6 +9,9 @@ Character capsule:
 Live agent files:
 {file_context}
 
+Current needs:
+{needs}
+
 Your goals:
 {goals_bulleted}
 
@@ -50,7 +53,7 @@ What do you do next? Respond with JSON only.
 """
 
 
-def build(agent_bio: dict, world_context: dict, plan_chunk: str, memories: list[dict]):
+def build(agent_bio: dict, world_context: dict, plan_chunk: str, memories: list[dict], needs: str = "content"):
     system = SYSTEM_TEMPLATE.format(
         name=agent_bio["name"],
         age=agent_bio["age"],
@@ -58,6 +61,7 @@ def build(agent_bio: dict, world_context: dict, plan_chunk: str, memories: list[
         personality=agent_bio["personality"],
         character_capsule=agent_bio.get("character_capsule", "No additional character details."),
         file_context=agent_bio.get("file_context", "No live agent files loaded."),
+        needs=needs,
         goals_bulleted="\n".join(f"- {g}" for g in agent_bio.get("goals", [])),
     )
     user = USER_TEMPLATE.format(

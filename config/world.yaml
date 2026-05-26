@@ -1,6 +1,6 @@
 locations:
   cafe:
-    description: "A warm cafe with the smell of fresh coffee, wooden tables, big windows looking out to the village square."
+    description: "A warm cafe with the smell of fresh coffee, wooden tables, and big windows looking out to the street."
     objects: [coffee_maker, pastry_case, corner_table]
   study_room:
     description: "A quiet study room with a heavy oak desk, shelves of books, and a single window."

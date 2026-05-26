@@ -1,6 +1,7 @@
 import asyncio
 
 from src.agents.agent import Agent
+from src.agents.proposals import MoveProposal, WaitProposal
 from src.world.resolver import ActionResolver
 
 
@@ -40,10 +41,25 @@ class SimulationEngine:
         proposals = await asyncio.gather(*[agent.propose_action(self.sim_tick, sim_time) for agent in self.agents])
         self.transcript.log("SYSTEM", "PHASE", "Resolving actions")
         resolver = ActionResolver(self.world, self.bus, self.event_repo, self.sim_tick, sim_time)
-        for proposal in proposals:
+        for proposal in sorted(proposals, key=self._resolution_priority):
+            if isinstance(proposal, WaitProposal):
+                self.transcript.log(proposal.agent, "WAIT", proposal.reason or "No action.")
             events = await resolver.resolve(proposal)
+            actor = getattr(proposal, "agent", None)
+            for agent in self.agents:
+                if agent.bio["name"] == actor:
+                    await agent.note_resolved_events(events)
+                    break
             for event in events:
                 self.transcript.log_event(event)
+
+    @staticmethod
+    def _resolution_priority(proposal) -> int:
+        if isinstance(proposal, WaitProposal):
+            return 3
+        if isinstance(proposal, MoveProposal):
+            return 2
+        return 1
 
     async def run(self, num_ticks: int) -> None:
         for _ in range(num_ticks):

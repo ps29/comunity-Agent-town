@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "generative-agents-simulation"
-version = "0.1.0"
-description = "Text-based generative agents simulation powered by a local OpenAI-compatible LLM backend."
+version = "0.2.0"
+description = "Text-based generative agents simulation with grounded actions, live agent files, needs, and semantic memory."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,6 +17,9 @@ dependencies = [
     "pyyaml>=6.0.0",
     "sentence-transformers>=2.7.0",
 ]
+
+[project.scripts]
+agent-harness = "src.harness.agent_harness:main"
 
 [project.optional-dependencies]
 dev = [

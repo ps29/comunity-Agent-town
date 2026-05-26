@@ -1,14 +1,19 @@
 import json
+import re
 
 from src.agents.proposals import MoveProposal, SpeakProposal, UseObjectProposal, WaitProposal
 from src.agents.personality import build_character_capsule
+from src.cognition.needs import AgentNeeds
 from src.llm.gateway import CallKind
 from src.prompts import act as act_prompt
 from src.prompts import plan as plan_prompt
 from src.prompts import reflect as reflect_prompt
-from src.prompts import score_importance as score_importance_prompt
 from src.world.events import MoveEvent, ObjectStateChangeEvent, RejectedActionEvent, SpeechEvent
 from src.world.context import build_action_menu, format_action_menu
+
+
+ACTION_PROMPT_CHAR_BUDGET = 12000
+MEMORY_TEXT_LIMIT = 240
 
 
 class Agent:
@@ -23,8 +28,10 @@ class Agent:
         reflection_threshold: int = 25,
         relationship_repo=None,
         plan_repo=None,
+        agent_repo=None,
         agent_ids_by_name: dict[str, int] | None = None,
         agent_files=None,
+        needs: AgentNeeds | None = None,
     ):
         self.bio = bio
         self.memory = memory
@@ -38,11 +45,14 @@ class Agent:
         self.reflection_threshold = reflection_threshold
         self.relationship_repo = relationship_repo
         self.plan_repo = plan_repo
+        self.agent_repo = agent_repo
         self.agent_ids_by_name = agent_ids_by_name or {}
         self.agent_files = agent_files
+        self.needs = needs or AgentNeeds.from_dict(bio.get("needs"))
         self._last_daily_plan_key: str | None = None
         self._last_end_of_day_key: str | None = None
         self._recent_messages: list[str] = []
+        self._recent_reflections: list[str] = []
 
     async def perceive(self, sim_tick: int, sim_time: str) -> list[dict]:
         location = self.world.agent_location(self.bio["name"])
@@ -73,24 +83,30 @@ class Agent:
         return new_mems
 
     async def _score_importance(self, observation: str) -> int:
-        system, user = score_importance_prompt.build(self.bio, observation)
-        result = await self.gateway.call(CallKind.SCORE_IMPORTANCE, system, user, self.bio["name"])
-        try:
-            return max(1, min(10, int(result.get("importance", 3))))
-        except (TypeError, ValueError):
-            return 3
+        text = observation.lower()
+        score = 3
+        if "said" in text or "moved from" in text:
+            score += 2
+        if "rejected" in text or "changed from" in text:
+            score += 1
+        if any(name.lower() in text for name in self.world.agent_positions if name != self.bio["name"]):
+            score += 1
+        if any(term in text for term in ("goal", "plan", "promise", "argument", "help", "research", "writing")):
+            score += 1
+        return max(1, min(10, score))
 
     async def maybe_reflect(self, sim_tick: int, sim_time: str, threshold: int | None = None) -> None:
         threshold = threshold or self.reflection_threshold
         if self.importance_accumulator < threshold:
             return
         recent_mems = await self.memory.repo.get_recent(self.bio["id"], n=15)
-        await self._refresh_prompt_context([])
+        await self._refresh_prompt_context([], purpose="reflect")
+        recent_mems = self._compact_memories(recent_mems, limit=10, text_limit=MEMORY_TEXT_LIMIT)
         system, user = reflect_prompt.build(self.bio, recent_mems)
         result = await self.gateway.call(CallKind.REFLECT, system, user, self.bio["name"])
         insights = result.get("insights") or []
         for insight in insights[:3]:
-            if isinstance(insight, str) and insight.strip():
+            if isinstance(insight, str) and insight.strip() and self._is_novel_reflection(insight):
                 await self.memory.add(
                     self.bio["id"],
                     "reflection",
@@ -101,9 +117,10 @@ class Agent:
                     metadata={"kind": "reflection", "character_update": True},
                 )
                 self.transcript.log(self.bio["name"], "REFLECT", insight)
+                self._remember_reflection(insight)
         knowledge = result.get("knowledge") or []
         if self.agent_files:
-            self.agent_files.append_knowledge(self.bio, knowledge[:3], sim_time)
+            self.agent_files.append_knowledge(self.bio, self._novel_lines(knowledge[:3]), sim_time)
         self.importance_accumulator = 0
         self.last_reflection_tick = sim_tick
 
@@ -111,7 +128,7 @@ class Agent:
         if self.current_plan and not force:
             return
         recent_reflections = await self.memory.repo.get_by_kind(self.bio["id"], "reflection", n=5)
-        await self._refresh_prompt_context([])
+        await self._refresh_prompt_context([], purpose="plan")
         system, user = plan_prompt.build(
             self.bio,
             sim_time,
@@ -140,6 +157,8 @@ class Agent:
         self.transcript.log(self.bio["name"], "PLAN", str(self.current_plan))
 
     async def propose_action(self, sim_tick: int, sim_time: str):
+        self.needs.decay_tick()
+        await self._persist_needs()
         location = self.world.agent_location(self.bio["name"])
         agents_here = [a for a in self.world.agents_at(location) if a != self.bio["name"]]
         plan_chunk = self._current_plan_chunk(sim_time)
@@ -149,10 +168,9 @@ class Agent:
             metadata_boosts["agents"] = agents_here[0]
         memories = await self.memory.retrieve(self.bio["id"], query, sim_tick, top_k=14, metadata_boosts=metadata_boosts)
         memories = self._memories_for_action_prompt(memories)
-        await self._refresh_prompt_context(agents_here)
+        await self._refresh_prompt_context(agents_here, purpose="act")
         action_menu = build_action_menu(self.world, self.bio["name"])
-        system, user = act_prompt.build(
-            self.bio,
+        system, user, memories = self._build_budgeted_action_prompt(
             {
                 "sim_time": sim_time,
                 "location": location,
@@ -167,6 +185,23 @@ class Agent:
         result = await self.gateway.call(CallKind.ACT, system, user, self.bio["name"])
         proposal = self._proposal_from_dict(result, agents_here, self.world.objects_at(location), location, plan_chunk, sim_time)
         return self._avoid_repetitive_speech(proposal, objects_here=self.world.objects_at(location), location=location, plan_chunk=plan_chunk)
+
+    def _build_budgeted_action_prompt(self, world_context: dict, plan_chunk: str, memories: list[dict]) -> tuple[str, str, list[dict]]:
+        kept = list(memories)
+        system, user = act_prompt.build(
+            self.bio,
+            world_context,
+            plan_chunk,
+            kept,
+            self.needs.status_string(),
+        )
+        while len(system) + len(user) > ACTION_PROMPT_CHAR_BUDGET and kept:
+            kept.pop()
+            system, user = act_prompt.build(self.bio, world_context, plan_chunk, kept, self.needs.status_string())
+        if len(system) + len(user) > ACTION_PROMPT_CHAR_BUDGET:
+            self.bio["file_context"] = self._truncate_text(self.bio.get("file_context", ""), 2200)
+            system, user = act_prompt.build(self.bio, world_context, plan_chunk, kept[:3], self.needs.status_string())
+        return system, user, kept
 
     async def daily_heartbeat(self, sim_tick: int, sim_time: str) -> None:
         day_key = f"{sim_tick // 48}:{sim_time}"
@@ -183,12 +218,31 @@ class Agent:
             return
         self._last_end_of_day_key = day_key
         recent_mems = await self.memory.repo.get_recent(self.bio["id"], n=20)
-        await self._refresh_prompt_context([])
+        await self._refresh_prompt_context([], purpose="reflect")
+        recent_mems = self._compact_memories(recent_mems, limit=12, text_limit=MEMORY_TEXT_LIMIT)
         system, user = reflect_prompt.build(self.bio, recent_mems)
         result = await self.gateway.call(CallKind.REFLECT, system, user, self.bio["name"])
         knowledge = result.get("knowledge") or result.get("insights") or []
         if self.agent_files:
-            self.agent_files.append_knowledge(self.bio, knowledge[:3], sim_time)
+            self.agent_files.append_knowledge(self.bio, self._novel_lines(knowledge[:3]), sim_time)
+        await self._consolidate_semantic_memories(recent_mems, knowledge, sim_tick)
+
+    async def note_resolved_events(self, events: list) -> None:
+        changed = False
+        for event in events:
+            if isinstance(event, SpeechEvent) and event.speaker == self.bio["name"]:
+                self.needs.socialize()
+                changed = True
+            elif isinstance(event, ObjectStateChangeEvent):
+                obj = event.object
+                if obj in {"coffee_maker", "pastry_case"} and self.world.agent_location(self.bio["name"]) == event.location:
+                    self.needs.satisfy_hunger(0.2)
+                    changed = True
+                if event.new_state == "occupied" and obj in {"bench", "reading_chair", "corner_table"}:
+                    self.needs.rest(0.15)
+                    changed = True
+        if changed:
+            await self._persist_needs()
 
     def _proposal_from_dict(
         self,
@@ -202,17 +256,21 @@ class Agent:
         action = result.get("action", "wait")
         name = self.bio["name"]
         if result.get("fallback"):
-            if agents_here:
-                target = agents_here[0]
-                message = self._sanitize_message_for_time(f"Good morning, {target}. How is your day going?", sim_time)
-                return SpeakProposal(name, target, message)
+            urgent = self._fallback_for_needs(objects_here or [], agents_here or [], location or "", sim_time)
+            if urgent:
+                return urgent
             planned_location = self._location_from_text(plan_chunk)
             if planned_location and planned_location != location:
                 return MoveProposal(name, planned_location)
             if objects_here:
-                affordance = self._default_affordance(objects_here[0])
+                target = self._best_fallback_object(objects_here)
+                affordance = self._default_affordance(target)
                 if affordance:
-                    return UseObjectProposal(name, objects_here[0], affordance)
+                    return UseObjectProposal(name, target, affordance)
+            if agents_here:
+                message = self._non_generic_fallback_message(agents_here[0], sim_time)
+                if message:
+                    return SpeakProposal(name, agents_here[0], message)
             return WaitProposal(name, "LLM fallback.")
         if action == "move_to":
             target = result.get("target", "")
@@ -234,22 +292,31 @@ class Agent:
             elif target not in (agents_here or []):
                 if target and self.world.has_agent(target):
                     target_location = self.world.agent_location(target)
-                if target_location != location:
-                    return MoveProposal(name, target_location)
+                    if target_location != location:
+                        return MoveProposal(name, target_location)
                 return WaitProposal(name, "No nearby person to speak with.")
+            if not message.strip():
+                message = self._fallback_message_for_target(target, sim_time)
             message = self._sanitize_message_for_target(message, target)
             return SpeakProposal(name, target, message)
         if action == "use_object":
-            target = self._normalize_object_target(result.get("target", ""), objects_here or [])
+            target = self._normalize_object_target(
+                result.get("target", ""),
+                objects_here or [],
+                result.get("interaction", ""),
+            )
             if target not in (objects_here or []) and target in self.world.objects:
                 object_location = self.world.object_info(target).get("location")
                 if object_location and object_location != location:
                     return MoveProposal(name, object_location)
             interaction = self._normalize_interaction(target, result.get("interaction", ""))
+            if not interaction.strip():
+                interaction = self._default_affordance(target) or ""
             return UseObjectProposal(name, target, interaction)
         if agents_here and not result:
-            message = self._sanitize_message_for_time(f"Good morning, {agents_here[0]}. How is your day going?", sim_time)
-            return SpeakProposal(name, agents_here[0], message)
+            message = self._non_generic_fallback_message(agents_here[0], sim_time)
+            if message:
+                return SpeakProposal(name, agents_here[0], message)
         return WaitProposal(name, result.get("reasoning", "No clear action."))
 
     def _deterministic_observations(self, location: str, agents_here: list[str], objects_here: list[str], recent_events: list) -> list[str]:
@@ -258,6 +325,7 @@ class Agent:
             if isinstance(event, SpeechEvent):
                 if event.speaker == self.bio["name"]:
                     continue
+                self._remember_message(event.content)
                 target = f" to {event.listener}" if event.listener else ""
                 observations.append(f"{event.speaker} said{target}: {event.content}")
             elif isinstance(event, MoveEvent):
@@ -275,12 +343,17 @@ class Agent:
         if not self.current_plan:
             return "(no plan yet)"
         hour = sim_time.split(":")[0]
-        return self.current_plan.get(f"hour_{hour}", "(no specific plan for this hour)")
+        return (
+            self.current_plan.get(sim_time)
+            or self.current_plan.get(f"hour_{hour}")
+            or self.current_plan.get(hour)
+            or "(no specific plan for this hour)"
+        )
 
     def _fallback_observation(self, location: str, agents_here: list[str], objects_here: list[str]) -> str:
         others = ", ".join(agents_here) if agents_here else "no one else"
         objects = ", ".join(objects_here) if objects_here else "no notable objects"
-        return f"{self.bio['name']} is at the {location} with {others}; nearby objects include {objects}."
+        return f"I am at the {location} with {others}; nearby objects include {objects}."
 
     def _normalize_observation(self, obs) -> str:
         if isinstance(obs, str):
@@ -312,10 +385,37 @@ class Agent:
                 return location
         return None
 
-    def _normalize_object_target(self, target: str, objects_here: list[str]) -> str:
+    def _normalize_object_target(self, target: str, objects_here: list[str], interaction: str = "") -> str:
         if target in objects_here:
             return target
         normalized = str(target).strip().lower().replace(" ", "_")
+        alias_map = {
+            "notebook": "desk",
+            "notes": "desk",
+            "pen": "desk",
+            "pens": "desk",
+            "writing_tools": "desk",
+            "book": "bookshelf",
+            "books": "bookshelf",
+            "coffee": "coffee_maker",
+            "espresso": "coffee_maker",
+            "latte": "coffee_maker",
+            "pastry": "pastry_case",
+            "croissant": "pastry_case",
+            "chair": "reading_chair",
+            "table": "corner_table",
+        }
+        if normalized in alias_map and alias_map[normalized] in objects_here:
+            return alias_map[normalized]
+        interaction_text = str(interaction).lower()
+        if "write" in interaction_text or "notebook" in interaction_text:
+            for candidate in ("desk", "study_table"):
+                if candidate in objects_here:
+                    return candidate
+        if "read" in interaction_text:
+            for candidate in ("bookshelf", "reading_chair"):
+                if candidate in objects_here:
+                    return candidate
         for obj in list(objects_here) + list(getattr(self.world, "objects", {}).keys()):
             if normalized == obj.lower() or normalized == obj.lower().replace(" ", "_"):
                 return obj
@@ -349,12 +449,13 @@ class Agent:
 
     def _default_affordance(self, target: str) -> str | None:
         affordances = self.world.object_affordances(target)
-        for preferred in ("sit", "read", "write", "observe", "browse", "organize_notes"):
+        for preferred in ("serve_coffee", "brew_coffee", "sit", "write", "read", "browse", "organize_notes", "serve_pastry", "check_pastries", "observe"):
             if preferred in affordances:
                 return preferred
         return affordances[0] if affordances else None
 
     def _sanitize_message_for_time(self, message: str, sim_time: str) -> str:
+        message = self._strip_json_tail(message)
         if not sim_time:
             return message
         try:
@@ -369,6 +470,21 @@ class Agent:
             return replacement + message[len("morning"):]
         return message
 
+    def _strip_json_tail(self, message: str) -> str:
+        markers = [
+            '", "interaction"',
+            '", "reasoning"',
+            '”, “interaction”',
+            '”, “reasoning”',
+            ',"interaction"',
+            ', “interaction”',
+        ]
+        for marker in markers:
+            idx = message.find(marker)
+            if idx >= 0:
+                message = message[:idx]
+        return message.strip().strip('"').strip()
+
     def _sanitize_message_for_target(self, message: str, target: str | None) -> str:
         if not target:
             return message
@@ -376,6 +492,12 @@ class Agent:
             if name != target and message.startswith(f"{name},"):
                 return f"{target}," + message[len(name) + 1:]
         return message
+
+    def _fallback_message_for_target(self, target: str | None, sim_time: str) -> str:
+        if not target:
+            return "I am nearby and paying attention."
+        message = f"Hello, {target}. How is your day going?"
+        return self._sanitize_message_for_time(message, sim_time)
 
     def _avoid_repetitive_speech(self, proposal, objects_here: list[str], location: str, plan_chunk: str):
         if not isinstance(proposal, SpeakProposal):
@@ -403,8 +525,11 @@ class Agent:
         normalized = self._message_terms(message)
         if not normalized:
             return False
-        generic = "good morning" in message.lower() and "how is your day going" in message.lower()
-        topic_terms = {"silas", "gatherings", "square", "river", "spirits", "folklore"}
+        generic = "how is your day going" in message.lower()
+        topic_terms = {
+            "silas", "gatherings", "square", "river", "spirits", "folklore", "henderson", "sketches", "croissant",
+            "higgins", "mill", "miller", "daughter", "espresso", "artwork", "david", "history", "thesis",
+        }
         topic_hits = normalized & topic_terms
         if len(topic_hits) >= 2:
             recent_topic_hits = sum(
@@ -420,8 +545,6 @@ class Agent:
         return generic and any("how is your day going" in prior.lower() for prior in self._recent_messages)
 
     def _message_terms(self, message: str) -> set[str]:
-        import re
-
         stop = {
             "the", "and", "that", "you", "your", "about", "with", "this", "have", "just",
             "really", "think", "what", "does", "like", "good", "morning", "afternoon",
@@ -432,22 +555,53 @@ class Agent:
     def _memories_for_action_prompt(self, memories: list[dict]) -> list[dict]:
         selected = []
         dialogue_count = 0
+        reflection_count = 0
         seen_phrases: set[str] = set()
         for memory in memories:
+            if memory.get("kind") == "plan":
+                continue
             content = str(memory.get("content", ""))
+            if self._looks_like_raw_plan(content):
+                continue
             is_dialogue = memory.get("kind") == "dialogue" or " said: " in content
-            phrase = " ".join(content.lower().split()[:12])
+            is_reflection = memory.get("kind") == "reflection"
+            normalized = self._normalize_for_dedupe(content)
+            phrase = " ".join(normalized.split()[:16])
             if phrase in seen_phrases:
                 continue
             if is_dialogue:
                 dialogue_count += 1
-                if dialogue_count > 4:
+                if dialogue_count > 2:
+                    continue
+            if is_reflection:
+                reflection_count += 1
+                if reflection_count > 2:
                     continue
             seen_phrases.add(phrase)
-            selected.append(memory)
-            if len(selected) >= 10:
+            compact = dict(memory)
+            compact["content"] = self._truncate_text(content, MEMORY_TEXT_LIMIT)
+            selected.append(compact)
+            if len(selected) >= 6:
                 break
         return selected
+
+    def _compact_memories(self, memories: list[dict], limit: int, text_limit: int) -> list[dict]:
+        compact = []
+        seen = set()
+        for memory in memories:
+            content = str(memory.get("content", ""))
+            if self._looks_like_raw_plan(content):
+                continue
+            key = self._normalize_for_dedupe(content)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            row = dict(memory)
+            row["content"] = self._truncate_text(content, text_limit)
+            compact.append(row)
+            if len(compact) >= limit:
+                break
+        return compact
 
     async def _character_capsule(self, nearby_agents: list[str]) -> str:
         relationship_notes = []
@@ -459,15 +613,32 @@ class Agent:
             ]
         return build_character_capsule(self.bio, relationship_notes)
 
-    async def _refresh_prompt_context(self, nearby_agents: list[str]) -> None:
+    async def _refresh_prompt_context(self, nearby_agents: list[str], purpose: str = "act") -> None:
         self.bio["character_capsule"] = await self._character_capsule(nearby_agents)
         if self.agent_files:
             files = self.agent_files.load_context(self.bio)
-            self.bio["file_context"] = (
-                f"SOUL.md:\n{files['soul']}\n\n"
-                f"KNOWLEDGE.md:\n{files['knowledge']}\n\n"
-                f"TODAY.md:\n{files['today']}"
-            )
+            knowledge = self._ground_agent_file_text(files["knowledge"], max_lines=5 if purpose == "act" else 12)
+            today = self._ground_agent_file_text(files["today"], max_lines=4 if purpose == "act" else 8)
+            semantic = await self.memory.get_semantic(self.bio["id"], min_confidence=0.2)
+            semantic_limit = 6 if purpose == "act" else 10
+            semantic_lines = "\n".join(
+                self._truncate_text(f"- {row['subject']}: {row['fact']}", MEMORY_TEXT_LIMIT)
+                for row in self._dedupe_semantic_rows(semantic)[:semantic_limit]
+            ) or "- no durable semantic facts yet"
+            if purpose == "act":
+                self.bio["file_context"] = (
+                    f"Knowledge:\n{knowledge}\n\n"
+                    f"Today:\n{today}\n\n"
+                    f"Semantic memory:\n{semantic_lines}"
+                )
+            else:
+                soul = self._compact_soul(files["soul"])
+                self.bio["file_context"] = (
+                    f"SOUL.md:\n{soul}\n\n"
+                    f"KNOWLEDGE.md (grounded lines only):\n{knowledge}\n\n"
+                    f"TODAY.md (grounded lines only):\n{today}\n\n"
+                    f"Semantic memory:\n{semantic_lines}"
+                )
         else:
             self.bio["file_context"] = "No live agent files loaded."
 
@@ -490,12 +661,197 @@ class Agent:
                 summary=f"Recently heard {speaker} say: {getattr(event, 'content', '')[:120]}",
                 metadata={"last_shared_tick": sim_tick, "last_location": getattr(event, "location", "")},
             )
-            await self.memory.add(
+            if not await self._has_similar_recent_dialogue(getattr(event, "content", "")):
+                await self.memory.add(
+                    self.bio["id"],
+                    "dialogue",
+                    f"{speaker} said: {getattr(event, 'content', '')}",
+                    5,
+                    sim_tick,
+                    sim_time,
+                    metadata={"kind": "dialogue", "agents": [speaker], "location": getattr(event, "location", "")},
+                )
+
+    async def _persist_needs(self) -> None:
+        if self.agent_repo:
+            await self.agent_repo.update_needs(self.bio["id"], self.needs.to_dict())
+
+    async def _consolidate_semantic_memories(self, recent_mems: list[dict], knowledge: list, sim_tick: int) -> None:
+        source_ids = [int(memory["id"]) for memory in recent_mems if "id" in memory]
+        for fact in knowledge[:5]:
+            if not isinstance(fact, str) or not fact.strip():
+                continue
+            if not self._is_novel_fact(fact):
+                continue
+            subject = self._semantic_subject(fact)
+            await self.memory.add_semantic(
                 self.bio["id"],
-                "dialogue",
-                f"{speaker} said: {getattr(event, 'content', '')}",
-                5,
+                subject,
+                fact.strip(),
+                0.65,
+                source_ids,
                 sim_tick,
-                sim_time,
-                metadata={"kind": "dialogue", "agents": [speaker], "location": getattr(event, "location", "")},
             )
+        await self.memory.mark_consolidated(source_ids)
+
+    def _semantic_subject(self, fact: str) -> str:
+        lowered = fact.lower()
+        for name in self.world.agent_positions:
+            if name.lower() in lowered:
+                return name
+        for location in self.world.locations:
+            if location.lower() in lowered or location.replace("_", " ") in lowered:
+                return location
+        return self.bio["name"]
+
+    def _ground_agent_file_text(self, text: str, max_lines: int = 12) -> str:
+        blocked_terms = {
+            "artisan",
+            "back room",
+            "bakery",
+            "henderson",
+            "river",
+            "silas",
+            "sketches",
+            "square",
+            "village square",
+        }
+        kept = []
+        for line in text.splitlines():
+            lowered = line.lower()
+            if any(term in lowered for term in blocked_terms):
+                continue
+            if not line.strip() or line.strip().startswith("#"):
+                continue
+            if line.strip().startswith("##"):
+                continue
+            kept.append(self._truncate_text(line, MEMORY_TEXT_LIMIT))
+            if len(kept) >= max_lines:
+                break
+        grounded = "\n".join(kept).strip()
+        return grounded or "# No grounded knowledge lines available yet."
+
+    def _fallback_for_needs(self, objects_here: list[str], agents_here: list[str], location: str, sim_time: str):
+        if self.needs.hunger > self.needs.hunger_threshold:
+            for target, affordance in (("pastry_case", "serve_pastry"), ("coffee_maker", "serve_coffee")):
+                if target in objects_here and affordance in self.world.object_affordances(target):
+                    return UseObjectProposal(self.bio["name"], target, affordance)
+        if self.needs.energy < self.needs.tiredness_threshold:
+            for target in ("bench", "reading_chair", "corner_table"):
+                if target in objects_here:
+                    affordance = "rest" if "rest" in self.world.object_affordances(target) else "sit"
+                    return UseObjectProposal(self.bio["name"], target, affordance)
+        if self.needs.social_satiety < self.needs.loneliness_threshold and agents_here:
+            message = self._non_generic_fallback_message(agents_here[0], sim_time)
+            if message:
+                return SpeakProposal(self.bio["name"], agents_here[0], message)
+        return None
+
+    def _best_fallback_object(self, objects_here: list[str]) -> str:
+        preferred = ("coffee_maker", "corner_table", "desk", "study_table", "bookshelf", "bench", "reading_chair", "pastry_case", "pond")
+        for obj in preferred:
+            if obj in objects_here:
+                return obj
+        return objects_here[0]
+
+    def _non_generic_fallback_message(self, target: str, sim_time: str) -> str:
+        if any("how is your day going" in msg.lower() for msg in self._recent_messages[-8:]):
+            return ""
+        hour_text = self._time_greeting(sim_time)
+        message = f"{hour_text}, {target}. I was noticing what you were focused on here."
+        if self._is_repetitive_message(message):
+            return ""
+        return message
+
+    def _time_greeting(self, sim_time: str) -> str:
+        try:
+            hour = int(sim_time.split(":", 1)[0])
+        except (TypeError, ValueError):
+            return "Hello"
+        if hour < 12:
+            return "Good morning"
+        if hour < 18:
+            return "Good afternoon"
+        return "Good evening"
+
+    def _truncate_text(self, text: str, limit: int) -> str:
+        text = " ".join(str(text).split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    def _normalize_for_dedupe(self, text: str) -> str:
+        words = re.findall(r"[a-z0-9']+", str(text).lower())
+        return " ".join(words[:32])
+
+    def _looks_like_raw_plan(self, content: str) -> bool:
+        stripped = content.strip()
+        return stripped.startswith("{") and ("hour_" in stripped or '"08:00"' in stripped or "'08:00'" in stripped)
+
+    def _compact_soul(self, text: str) -> str:
+        lines = []
+        for line in text.splitlines():
+            clean = line.strip()
+            if not clean:
+                continue
+            lines.append(self._truncate_text(clean, 180))
+            if len(lines) >= 10:
+                break
+        return "\n".join(lines)
+
+    def _dedupe_semantic_rows(self, rows: list[dict]) -> list[dict]:
+        seen = set()
+        kept = []
+        for row in rows:
+            key = self._normalize_for_dedupe(f"{row.get('subject', '')} {row.get('fact', '')}")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            kept.append(row)
+        return kept
+
+    def _novel_lines(self, lines: list) -> list[str]:
+        novel = []
+        seen = set()
+        existing = self._normalize_for_dedupe(self.bio.get("file_context", ""))
+        for line in lines:
+            if not isinstance(line, str) or not line.strip():
+                continue
+            key = self._normalize_for_dedupe(line)
+            if not key or key in seen or key in existing:
+                continue
+            seen.add(key)
+            novel.append(line.strip())
+        return novel
+
+    def _is_novel_reflection(self, text: str) -> bool:
+        terms = self._message_terms(text)
+        if not terms:
+            return False
+        for prior in self._recent_reflections[-8:]:
+            prior_terms = self._message_terms(prior)
+            if len(terms & prior_terms) / max(1, len(terms | prior_terms)) >= 0.55:
+                return False
+        return True
+
+    def _remember_reflection(self, text: str) -> None:
+        self._recent_reflections.append(text)
+        self._recent_reflections = self._recent_reflections[-10:]
+
+    def _is_novel_fact(self, fact: str) -> bool:
+        fact_key = self._normalize_for_dedupe(fact)
+        context_key = self._normalize_for_dedupe(self.bio.get("file_context", ""))
+        return bool(fact_key and fact_key not in context_key)
+
+    async def _has_similar_recent_dialogue(self, content: str) -> bool:
+        if not hasattr(self.memory.repo, "get_by_kind"):
+            return False
+        recent = await self.memory.repo.get_by_kind(self.bio["id"], "dialogue", n=6)
+        terms = self._message_terms(content)
+        if not terms:
+            return False
+        for row in recent:
+            prior_terms = self._message_terms(str(row.get("content", "")))
+            if len(terms & prior_terms) / max(1, len(terms | prior_terms)) >= 0.62:
+                return True
+        return False

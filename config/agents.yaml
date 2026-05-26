@@ -35,6 +35,10 @@ agents:
       stress: low
       confidence: high
       social_battery: high
+    needs:
+      hunger: 0.15
+      energy: 0.9
+      social_satiety: 0.8
     start_location: cafe
 
   - name: John
@@ -73,6 +77,10 @@ agents:
       stress: medium
       confidence: wavering
       social_battery: low
+    needs:
+      hunger: 0.25
+      energy: 0.75
+      social_satiety: 0.35
     start_location: study_room
 
   - name: Emma
@@ -111,4 +119,8 @@ agents:
       stress: low
       confidence: medium
       social_battery: high
+    needs:
+      hunger: 0.2
+      energy: 0.85
+      social_satiety: 0.7
     start_location: library

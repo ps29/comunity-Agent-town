@@ -1,8 +1,8 @@
 from openai import AsyncOpenAI
 
 
-class LMStudioClient:
-    def __init__(self, base_url: str, model: str, api_key: str = "ollama"):
+class LlamaCppClient:
+    def __init__(self, base_url: str, model: str, api_key: str = "llama.cpp"):
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self.model = model
 
