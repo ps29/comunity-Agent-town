@@ -19,6 +19,8 @@ DEFAULT_MODEL = Path(
 )
 DEFAULT_ALIAS = "gemma3-4b"
 DEFAULT_OUT = Path(".tmp")
+REQUIRED_VULKAN_DEVICE = "AMD Radeon(TM) 8060S Graphics"
+REQUIRED_VULKAN_TARGET = "Vulkan0"
 REQUIRED_GEMMA3_EPSILON_KEY = "gemma3.attention.layer_norm_rms_epsilon"
 TOKENIZER_ARRAY_KEYS = {
     "tokenizer.ggml.scores",
@@ -176,7 +178,7 @@ def require_gpu_device(llama_dir: Path, env: dict[str, str]) -> str:
     output = result.stdout + result.stderr
     if result.returncode != 0:
         raise RuntimeError(f"llama-bench --list-devices failed:\n{output}")
-    if "Vulkan" not in output or "AMD Radeon(TM) 8060S Graphics" not in output:
+    if "Vulkan" not in output or REQUIRED_VULKAN_DEVICE not in output:
         raise RuntimeError(f"Required Vulkan GPU was not detected:\n{output}")
     return output
 
@@ -228,7 +230,7 @@ def start_server(
                 "-ngl",
                 "99",
                 "-dev",
-                "Vulkan0",
+                REQUIRED_VULKAN_TARGET,
                 "--ctx-size",
                 str(ctx_size),
                 "--host",
@@ -260,10 +262,32 @@ def wait_for_server(log_path: Path, timeout_seconds: int = 120) -> str:
 
 
 def require_gpu_offload(log_text: str) -> None:
-    has_vulkan = "loaded Vulkan backend" in log_text or "ggml_vulkan" in log_text or "Vulkan0" in log_text
-    offload_match = re.search(r"offload(?:ing|ed)?\s+(\d+)/(\d+)\s+layers", log_text, re.IGNORECASE)
-    if not has_vulkan or not offload_match or int(offload_match.group(1)) <= 0:
+    status = gpu_offload_status(log_text)
+    if not status["has_vulkan"] or not status["has_required_device"] or int(status["offloaded_layers"] or 0) <= 0:
         raise RuntimeError(f"llama-server did not prove Vulkan layer offload:\n{log_text}")
+
+
+def gpu_offload_status(log_text: str) -> dict[str, bool | int | None | str]:
+    offload_match = re.search(r"offload(?:ing|ed)?\s+(\d+)/(\d+)\s+layers", log_text, re.IGNORECASE)
+    assigned_layers = len(re.findall(r"assigned to device\s+Vulkan0\b", log_text, re.IGNORECASE))
+    offloaded_layers = int(offload_match.group(1)) if offload_match else assigned_layers
+    total_layers = int(offload_match.group(2)) if offload_match else None
+    return {
+        "has_vulkan": "loaded Vulkan backend" in log_text or "ggml_vulkan" in log_text or REQUIRED_VULKAN_TARGET in log_text,
+        "has_required_device": REQUIRED_VULKAN_DEVICE in log_text or REQUIRED_VULKAN_TARGET in log_text,
+        "offloaded_layers": offloaded_layers,
+        "total_layers": total_layers,
+        "device": REQUIRED_VULKAN_TARGET,
+        "device_name": REQUIRED_VULKAN_DEVICE,
+    }
+
+
+def format_gpu_offload_status(log_text: str) -> str:
+    status = gpu_offload_status(log_text)
+    layers = status["offloaded_layers"]
+    total = status["total_layers"]
+    layer_text = f"{layers}/{total} layers" if total else f"{layers} layers"
+    return f"{status['device']} ({status['device_name']}), offloaded {layer_text}"
 
 
 def smoke_request(base_url: str, alias: str) -> str:

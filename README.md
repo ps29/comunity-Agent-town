@@ -68,6 +68,20 @@ C:\Users\pssh\llama.cpp\llama-server.exe `
 
 The startup log must show the Vulkan backend and GPU layer offload. CPU-only fallback is not an accepted configuration.
 
+The most reliable way to ensure the simulation uses the AMD GPU is to let
+`src.main` start `llama-server` itself:
+
+```powershell
+python -m src.main --ticks 20 --start-llama-server --llama-ctx-size 16384
+```
+
+That path pins `GGML_VK_VISIBLE_DEVICES=0`, starts llama.cpp with `-ngl 99
+-dev Vulkan0`, and fails startup unless the server log proves Vulkan layer
+offload on `AMD Radeon(TM) 8060S Graphics`. If you run `python -m src.main`
+without `--start-llama-server`, the simulation connects to whatever server is
+already listening at `LLAMA_CPP_URL`/`config/simulation.yaml`; it cannot prove
+that external process was launched with GPU offload.
+
 ## Run
 
 ```powershell

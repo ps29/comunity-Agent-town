@@ -17,6 +17,7 @@ from src.llm.benchmark import (
     DEFAULT_ALIAS,
     DEFAULT_LLAMA_DIR,
     DEFAULT_MODEL,
+    format_gpu_offload_status,
     require_gpu_offload,
     start_server,
     wait_for_server,
@@ -74,10 +75,11 @@ async def main():
         )
         log_text = wait_for_server(args.llama_server_log)
         require_gpu_offload(log_text)
+        gpu_status = format_gpu_offload_status(log_text)
         os.environ["LLAMA_CPP_URL"] = "http://127.0.0.1:8080/v1"
         os.environ["PRIMARY_MODEL"] = args.llama_alias
         os.environ["CHEAP_MODEL"] = args.llama_alias
-        print(f"llama.cpp server ready on GPU. Log: {args.llama_server_log}")
+        print(f"llama.cpp server ready on AMD GPU: {gpu_status}. Log: {args.llama_server_log}")
 
     db_path = args.db or os.environ.get("DATABASE_URL") or "simulation.sqlite3"
     await init_db(db_path)
@@ -87,6 +89,11 @@ async def main():
         base_url = os.environ.get("LLAMA_CPP_URL") or sim_cfg["llama_cpp_url"]
         primary_model = os.environ.get("PRIMARY_MODEL") or sim_cfg["primary_model"]
         cheap_model = os.environ.get("CHEAP_MODEL") or sim_cfg["cheap_model"]
+        if not args.start_llama_server:
+            print(
+                "Using existing llama.cpp server; this process cannot verify GPU offload. "
+                "Use --start-llama-server to enforce AMD Vulkan GPU startup."
+            )
         primary = LlamaCppClient(base_url, primary_model)
         cheap = LlamaCppClient(base_url, cheap_model)
         gateway = LLMGateway(primary, cheap, event_log)
