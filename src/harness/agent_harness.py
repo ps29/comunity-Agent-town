@@ -110,9 +110,9 @@ class DeterministicGateway:
 
     def _plan(self, agent_name: str) -> dict:
         plans = {
-            "Maria": {"hour_08": "Prepare coffee at the cafe.", "hour_09": "Talk with visitors at the cafe."},
-            "John": {"hour_08": "Write at the desk in the study_room.", "hour_09": "Visit the cafe for coffee."},
-            "Emma": {"hour_08": "Study at the library.", "hour_09": "Visit the cafe and meet people."},
+            "Maria": {"hour_08": "Prepare coffee at the cafe.", "hour_09": "Read the notice_board at the town_square."},
+            "John": {"hour_08": "Write at the typewriter in the newspaper_office.", "hour_09": "Observe the river_marker on the riverside_path."},
+            "Emma": {"hour_08": "Study at the library.", "hour_09": "Search archive_boxes in the archive_room."},
         }
         return plans.get(agent_name, {"hour_08": "Observe the village.", "hour_09": "Talk with a nearby person."})
 
@@ -166,8 +166,14 @@ class DeterministicGateway:
         return user.split(marker, 1)[1].split("\n", 1)[0].strip()
 
     def _planned_destination(self, agent_name: str, location: str) -> str | None:
-        if agent_name in {"John", "Emma"} and location != "cafe":
-            return "cafe"
+        destinations = {
+            "Maria": "town_square",
+            "John": "riverside_path",
+            "Emma": "archive_room",
+        }
+        destination = destinations.get(agent_name)
+        if destination and location != destination:
+            return destination
         return None
 
     def _use_first_known_object(self, objects: list[str]) -> dict:
@@ -177,6 +183,24 @@ class DeterministicGateway:
             "corner_table": "sit",
             "desk": "write",
             "bookshelf": "read",
+            "notice_board": "read_notice",
+            "town_map": "study_map",
+            "archive_boxes": "search_records",
+            "map_table": "study_map",
+            "old_ledger": "review_notes",
+            "river_marker": "observe",
+            "willow_bench": "sit",
+            "old_mill_wheel": "inspect",
+            "mill_door": "inspect",
+            "grain_sacks": "inspect",
+            "market_crates": "browse_market",
+            "flower_stall": "browse_market",
+            "meeting_table": "host_meeting",
+            "event_calendar": "read_notice",
+            "typewriter": "write_article",
+            "clippings_wall": "review_notes",
+            "reporter_notebook": "review_notes",
+            "local_history_shelf": "search_records",
             "bench": "sit",
             "pond": "observe",
             "study_table": "write",

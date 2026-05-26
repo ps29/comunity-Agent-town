@@ -5,6 +5,27 @@ Text-based generative agents simulation inspired by Stanford's "Generative Agent
 This project targets a local `llama.cpp` server through its OpenAI-compatible API. The default config expects `llama-server` at `http://localhost:8080/v1`.
 By default, one tick is 30 simulated minutes, so 48 ticks covers one full simulated day.
 
+## Town Setting
+
+The default world is now a small cozy mystery town rather than a cafe-only
+village loop. The map includes the cafe, town square, library, archive room,
+riverside path, old mill, market stalls, community hall, newspaper office, and
+park. Agents can ground actions in town objects such as the `notice_board`,
+`archive_boxes`, `map_table`, `river_marker`, `old_mill_wheel`,
+`market_crates`, `event_calendar`, `typewriter`, and `clippings_wall`.
+
+The current cast remains three agents:
+
+- Maria runs the cafe as a community hub and follows notices, market gossip,
+  and community events.
+- John is a novelist and part-time newspaper contributor who follows civic
+  oddities for story material.
+- Emma is a folklore researcher tracing a gentle mystery around old records,
+  riverside markers, and the mill.
+
+The wider setting is still fully grounded: agents can only move to configured
+locations and use listed object affordances from `config/world.yaml`.
+
 ## Setup
 
 ```powershell

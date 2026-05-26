@@ -135,6 +135,10 @@ class Agent:
             recent_reflections,
             {
                 "locations": list(self.world.locations.keys()),
+                "location_descriptions": {
+                    name: info.get("description", "")
+                    for name, info in self.world.locations.items()
+                },
                 "agents": list(self.world.agent_positions.keys()),
                 "objects": list(self.world.objects.keys()),
             },
@@ -283,6 +287,8 @@ class Agent:
                 object_location = self.world.object_info(object_target).get("location")
                 if object_location and object_location != location:
                     return MoveProposal(name, object_location)
+            if target == location:
+                return WaitProposal(name, "Already at the planned location.")
             return MoveProposal(name, target)
         if action == "speak_to":
             target = result.get("target")
@@ -373,10 +379,25 @@ class Agent:
 
     def _fallback_plan(self) -> dict:
         if self.bio["name"] == "Maria":
-            return {"hour_08": "Prepare the cafe.", "hour_09": "Welcome visitors at the cafe.", "hour_10": "Visit the park for a short break."}
+            return {
+                "hour_08": "Prepare the cafe.",
+                "hour_09": "Read the notice_board at the town_square.",
+                "hour_10": "Browse market_crates at the market_stalls.",
+                "hour_11": "Host a brief check-in at the community_hall.",
+            }
         if self.bio["name"] == "John":
-            return {"hour_08": "Write quietly in the study room.", "hour_09": "Walk to the cafe for coffee.", "hour_10": "Talk with one friend."}
-        return {"hour_08": "Study at the library.", "hour_09": "Visit the cafe and meet people.", "hour_10": "Read in the park."}
+            return {
+                "hour_08": "Write at the typewriter in the newspaper_office.",
+                "hour_09": "Review notes on the clippings_wall.",
+                "hour_10": "Walk the riverside_path and observe the river_marker.",
+                "hour_11": "Visit the cafe for one conversation.",
+            }
+        return {
+            "hour_08": "Study at the library.",
+            "hour_09": "Search archive_boxes in the archive_room.",
+            "hour_10": "Study the map_table for old place names.",
+            "hour_11": "Inspect the old_mill_wheel at the old_mill.",
+        }
 
     def _location_from_text(self, text: str) -> str | None:
         text = text.lower()
@@ -386,6 +407,13 @@ class Agent:
         return None
 
     def _normalize_object_target(self, target: str, objects_here: list[str], interaction: str = "") -> str:
+        interaction_text = str(interaction).lower()
+        if any(term in interaction_text for term in ("sit", "rest")):
+            affordances = self.world.object_affordances(target)
+            if "sit" not in affordances and "rest" not in affordances:
+                for candidate in ("reading_chair", "willow_bench", "bench", "corner_table"):
+                    if candidate in objects_here:
+                        return candidate
         if target in objects_here:
             return target
         normalized = str(target).strip().lower().replace(" ", "_")
@@ -395,8 +423,54 @@ class Agent:
             "pen": "desk",
             "pens": "desk",
             "writing_tools": "desk",
+            "article": "typewriter",
+            "story": "typewriter",
+            "draft": "typewriter",
+            "typewriter": "typewriter",
+            "clippings": "clippings_wall",
+            "clipping": "clippings_wall",
+            "newspaper": "clippings_wall",
+            "reporter_notes": "reporter_notebook",
+            "reporter_notebook": "reporter_notebook",
             "book": "bookshelf",
             "books": "bookshelf",
+            "shelf": "local_history_shelf",
+            "local_history": "local_history_shelf",
+            "local_history_shelf": "local_history_shelf",
+            "archive": "archive_boxes",
+            "archives": "archive_boxes",
+            "records": "archive_boxes",
+            "record_boxes": "archive_boxes",
+            "boxes": "archive_boxes",
+            "ledger": "old_ledger",
+            "old_ledger": "old_ledger",
+            "map": "map_table",
+            "maps": "map_table",
+            "map_table": "map_table",
+            "notice": "notice_board",
+            "notice_board": "notice_board",
+            "notices": "notice_board",
+            "calendar": "event_calendar",
+            "event_calendar": "event_calendar",
+            "lost_and_found": "lost_and_found_box",
+            "lost_and_found_box": "lost_and_found_box",
+            "meeting": "meeting_table",
+            "meeting_table": "meeting_table",
+            "mill": "old_mill_wheel",
+            "mill_wheel": "old_mill_wheel",
+            "old_mill_wheel": "old_mill_wheel",
+            "mill_door": "mill_door",
+            "door": "mill_door",
+            "grain": "grain_sacks",
+            "grain_sacks": "grain_sacks",
+            "river_marker": "river_marker",
+            "marker": "river_marker",
+            "willow_bench": "willow_bench",
+            "market": "market_crates",
+            "market_crates": "market_crates",
+            "crates": "market_crates",
+            "flower_stall": "flower_stall",
+            "flowers": "flower_stall",
             "coffee": "coffee_maker",
             "espresso": "coffee_maker",
             "latte": "coffee_maker",
@@ -407,13 +481,32 @@ class Agent:
         }
         if normalized in alias_map and alias_map[normalized] in objects_here:
             return alias_map[normalized]
-        interaction_text = str(interaction).lower()
         if "write" in interaction_text or "notebook" in interaction_text:
-            for candidate in ("desk", "study_table"):
+            for candidate in ("typewriter", "reporter_notebook", "desk", "study_table"):
+                if candidate in objects_here:
+                    return candidate
+        if any(term in interaction_text for term in ("notice", "posted", "calendar")):
+            for candidate in ("notice_board", "event_calendar"):
+                if candidate in objects_here:
+                    return candidate
+        if any(term in interaction_text for term in ("archive", "record", "ledger")):
+            for candidate in ("archive_boxes", "old_ledger", "local_history_shelf", "clippings_wall"):
+                if candidate in objects_here:
+                    return candidate
+        if "map" in interaction_text:
+            for candidate in ("map_table", "town_map"):
+                if candidate in objects_here:
+                    return candidate
+        if any(term in interaction_text for term in ("mill", "wheel")):
+            for candidate in ("old_mill_wheel", "mill_door", "grain_sacks"):
+                if candidate in objects_here:
+                    return candidate
+        if any(term in interaction_text for term in ("market", "crate", "stall", "flower")):
+            for candidate in ("market_crates", "flower_stall"):
                 if candidate in objects_here:
                     return candidate
         if "read" in interaction_text:
-            for candidate in ("bookshelf", "reading_chair"):
+            for candidate in ("local_history_shelf", "bookshelf", "reading_chair", "notice_board", "event_calendar"):
                 if candidate in objects_here:
                     return candidate
         for obj in list(objects_here) + list(getattr(self.world, "objects", {}).keys()):
@@ -432,10 +525,41 @@ class Agent:
             ("coffee", "brew_coffee"),
             ("pastry", "serve_pastry"),
             ("croissant", "serve_pastry"),
+            ("notice", "read_notice"),
+            ("posted", "read_notice"),
+            ("calendar", "read_notice"),
+            ("post", "post_notice"),
+            ("archive", "search_records"),
+            ("record", "search_records"),
+            ("consult", "search_records"),
+            ("ledger", "review_notes"),
+            ("clipping", "review_notes"),
+            ("open", "review_notes"),
+            ("consult", "review_notes"),
+            ("examine", "review_notes"),
+            ("examine", "inspect"),
+            ("examine", "observe"),
+            ("notes", "review_notes"),
+            ("review", "review_notes"),
+            ("map", "study_map"),
+            ("mill", "inspect"),
+            ("wheel", "inspect"),
+            ("door", "inspect"),
+            ("grain", "inspect"),
+            ("inspect", "inspect"),
+            ("market", "browse_market"),
+            ("crate", "browse_market"),
+            ("stall", "browse_market"),
+            ("meeting", "host_meeting"),
+            ("host", "host_meeting"),
+            ("article", "write_article"),
+            ("newspaper", "write_article"),
             ("write", "write"),
             ("notebook", "write"),
             ("organize", "organize_notes"),
             ("arrange", "organize_notes"),
+            ("sort", "organize_notes"),
+            ("outline", "organize_notes"),
             ("read", "read"),
             ("browse", "browse"),
             ("sit", "sit"),
@@ -449,7 +573,26 @@ class Agent:
 
     def _default_affordance(self, target: str) -> str | None:
         affordances = self.world.object_affordances(target)
-        for preferred in ("serve_coffee", "brew_coffee", "sit", "write", "read", "browse", "organize_notes", "serve_pastry", "check_pastries", "observe"):
+        for preferred in (
+            "read_notice",
+            "search_records",
+            "study_map",
+            "inspect",
+            "browse_market",
+            "write_article",
+            "review_notes",
+            "host_meeting",
+            "serve_coffee",
+            "brew_coffee",
+            "sit",
+            "write",
+            "read",
+            "browse",
+            "organize_notes",
+            "serve_pastry",
+            "check_pastries",
+            "observe",
+        ):
             if preferred in affordances:
                 return preferred
         return affordances[0] if affordances else None
@@ -710,11 +853,8 @@ class Agent:
             "back room",
             "bakery",
             "henderson",
-            "river",
             "silas",
             "sketches",
-            "square",
-            "village square",
         }
         kept = []
         for line in text.splitlines():
@@ -748,7 +888,25 @@ class Agent:
         return None
 
     def _best_fallback_object(self, objects_here: list[str]) -> str:
-        preferred = ("coffee_maker", "corner_table", "desk", "study_table", "bookshelf", "bench", "reading_chair", "pastry_case", "pond")
+        preferred = (
+            "notice_board",
+            "archive_boxes",
+            "map_table",
+            "old_mill_wheel",
+            "river_marker",
+            "market_crates",
+            "typewriter",
+            "clippings_wall",
+            "meeting_table",
+            "coffee_maker",
+            "corner_table",
+            "study_table",
+            "local_history_shelf",
+            "bench",
+            "reading_chair",
+            "pastry_case",
+            "pond",
+        )
         for obj in preferred:
             if obj in objects_here:
                 return obj

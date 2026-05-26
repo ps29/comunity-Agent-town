@@ -1,16 +1,34 @@
 locations:
   cafe:
-    description: "A warm cafe with the smell of fresh coffee, wooden tables, and big windows looking out to the street."
+    description: "A warm cafe with fresh coffee, pastry cases, window seats, and a counter where town gossip gathers."
     objects: [coffee_maker, pastry_case, corner_table]
-  study_room:
-    description: "A quiet study room with a heavy oak desk, shelves of books, and a single window."
-    objects: [desk, bookshelf]
-  park:
-    description: "A small park with benches, oak trees, and a path that loops around a pond."
-    objects: [bench, pond]
+  town_square:
+    description: "The cobbled town square, anchored by a notice board, a dry fountain, and paths leading toward every busy corner of town."
+    objects: [notice_board, fountain, town_map]
   library:
-    description: "The village library, with study tables, deep armchairs, and rows of shelves."
-    objects: [study_table, reading_chair]
+    description: "The public library, with study tables, deep armchairs, local-history shelves, and a locked archive door."
+    objects: [study_table, reading_chair, local_history_shelf]
+  archive_room:
+    description: "A narrow archive room behind the library, full of labeled boxes, map drawers, brittle ledgers, and dust."
+    objects: [archive_boxes, map_table, old_ledger]
+  riverside_path:
+    description: "A willow-lined path beside the river, marked by old stone distance markers and a view toward the mill."
+    objects: [river_marker, willow_bench]
+  old_mill:
+    description: "The abandoned old mill at the bend in the river, quiet except for the creak of the wheel and loose shutters."
+    objects: [old_mill_wheel, mill_door, grain_sacks]
+  market_stalls:
+    description: "A row of morning market stalls with produce crates, folded awnings, and neighbors trading small news."
+    objects: [market_crates, flower_stall, weighing_scale]
+  community_hall:
+    description: "The community hall, used for meetings, lost-and-found notices, and planning town festivals."
+    objects: [meeting_table, lost_and_found_box, event_calendar]
+  newspaper_office:
+    description: "A cramped newspaper office with a typewriter, clippings wall, spare notebooks, and a kettle in the corner."
+    objects: [typewriter, clippings_wall, reporter_notebook]
+  park:
+    description: "A small park with benches, oak trees, and a path that loops around a still pond."
+    objects: [bench, pond]
 
 objects:
   coffee_maker:
@@ -28,26 +46,21 @@ objects:
     location: cafe
     allowed_states: [empty, occupied]
     affordances: [sit, leave]
-  desk:
-    state: empty
-    location: study_room
-    allowed_states: [empty, in_use, organized]
-    affordances: [write, organize_notes]
-  bookshelf:
-    state: full
-    location: study_room
-    allowed_states: [full, in_use]
-    affordances: [read, browse]
-  bench:
-    state: empty
-    location: park
-    allowed_states: [empty, occupied]
-    affordances: [sit, rest]
-  pond:
-    state: still
-    location: park
-    allowed_states: [still, observed]
+  notice_board:
+    state: posted
+    location: town_square
+    allowed_states: [posted, reviewed]
+    affordances: [read_notice, post_notice, observe]
+  fountain:
+    state: dry
+    location: town_square
+    allowed_states: [dry, observed]
     affordances: [observe]
+  town_map:
+    state: posted
+    location: town_square
+    allowed_states: [posted, reviewed]
+    affordances: [study_map, observe]
   study_table:
     state: empty
     location: library
@@ -58,3 +71,103 @@ objects:
     location: library
     allowed_states: [empty, occupied]
     affordances: [sit, read]
+  local_history_shelf:
+    state: full
+    location: library
+    allowed_states: [full, in_use, reviewed]
+    affordances: [read, browse, search_records]
+  archive_boxes:
+    state: untouched
+    location: archive_room
+    allowed_states: [untouched, reviewed, organized]
+    affordances: [search_records, organize_notes, observe]
+  map_table:
+    state: empty
+    location: archive_room
+    allowed_states: [empty, in_use, reviewed]
+    affordances: [study_map, organize_notes, observe]
+  old_ledger:
+    state: closed
+    location: archive_room
+    allowed_states: [closed, reviewed]
+    affordances: [review_notes, search_records, observe]
+  river_marker:
+    state: weathered
+    location: riverside_path
+    allowed_states: [weathered, observed]
+    affordances: [observe, inspect]
+  willow_bench:
+    state: empty
+    location: riverside_path
+    allowed_states: [empty, occupied]
+    affordances: [sit, rest, observe]
+  old_mill_wheel:
+    state: still
+    location: old_mill
+    allowed_states: [still, inspected, observed]
+    affordances: [inspect, observe]
+  mill_door:
+    state: locked
+    location: old_mill
+    allowed_states: [locked, inspected]
+    affordances: [inspect, observe]
+  grain_sacks:
+    state: dusty
+    location: old_mill
+    allowed_states: [dusty, inspected]
+    affordances: [inspect, observe]
+  market_crates:
+    state: stocked
+    location: market_stalls
+    allowed_states: [stocked, browsed]
+    affordances: [browse_market, observe]
+  flower_stall:
+    state: open
+    location: market_stalls
+    allowed_states: [open, browsed]
+    affordances: [browse_market, observe]
+  weighing_scale:
+    state: balanced
+    location: market_stalls
+    allowed_states: [balanced, observed]
+    affordances: [observe]
+  meeting_table:
+    state: empty
+    location: community_hall
+    allowed_states: [empty, in_use, organized]
+    affordances: [host_meeting, organize_notes, observe]
+  lost_and_found_box:
+    state: closed
+    location: community_hall
+    allowed_states: [closed, reviewed]
+    affordances: [review_notes, observe]
+  event_calendar:
+    state: posted
+    location: community_hall
+    allowed_states: [posted, reviewed]
+    affordances: [read_notice, post_notice, observe]
+  typewriter:
+    state: idle
+    location: newspaper_office
+    allowed_states: [idle, in_use]
+    affordances: [write, write_article]
+  clippings_wall:
+    state: posted
+    location: newspaper_office
+    allowed_states: [posted, reviewed]
+    affordances: [review_notes, search_records, observe]
+  reporter_notebook:
+    state: closed
+    location: newspaper_office
+    allowed_states: [closed, in_use, reviewed]
+    affordances: [write, review_notes, organize_notes]
+  bench:
+    state: empty
+    location: park
+    allowed_states: [empty, occupied]
+    affordances: [sit, rest]
+  pond:
+    state: still
+    location: park
+    allowed_states: [still, observed]
+    affordances: [observe]

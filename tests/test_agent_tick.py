@@ -324,3 +324,106 @@ def test_agent_move_to_nearby_object_becomes_object_use():
     assert isinstance(proposal, UseObjectProposal)
     assert proposal.object == "corner_table"
     assert proposal.interaction == "sit"
+
+
+def test_agent_same_location_move_waits_instead_of_emitting_noop_move():
+    bio = {"id": 1, "name": "John", "age": 32, "job": "writer", "personality": "Quiet", "goals": []}
+    world = WorldState({"newspaper_office": {"objects": []}}, {})
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+    proposal = agent._proposal_from_dict(
+        {"action": "move_to", "target": "newspaper_office"},
+        location="newspaper_office",
+    )
+    assert proposal.reason == "Already at the planned location."
+
+
+def test_agent_retargets_sitting_at_non_seat_to_nearby_seat():
+    bio = {"id": 1, "name": "John", "age": 32, "job": "writer", "personality": "Quiet", "goals": []}
+    world = WorldState(
+        {"library": {"objects": ["study_table", "reading_chair"]}},
+        {
+            "study_table": {"state": "empty", "location": "library", "affordances": ["write"], "allowed_states": ["empty", "in_use"]},
+            "reading_chair": {"state": "empty", "location": "library", "affordances": ["sit", "read"], "allowed_states": ["empty", "occupied"]},
+        },
+    )
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+    proposal = agent._proposal_from_dict(
+        {"action": "use_object", "target": "study_table", "interaction": "sit"},
+        objects_here=["study_table", "reading_chair"],
+    )
+    assert isinstance(proposal, UseObjectProposal)
+    assert proposal.object == "reading_chair"
+    assert proposal.interaction == "sit"
+
+
+def test_agent_normalizes_cozy_mystery_town_object_actions():
+    bio = {"id": 1, "name": "Emma", "age": 26, "job": "researcher", "personality": "Curious", "goals": []}
+    world = WorldState(
+        {
+            "town_square": {"objects": ["notice_board", "town_map"]},
+            "archive_room": {"objects": ["archive_boxes", "map_table", "old_ledger"]},
+            "old_mill": {"objects": ["old_mill_wheel"]},
+            "market_stalls": {"objects": ["market_crates"]},
+            "newspaper_office": {"objects": ["typewriter", "clippings_wall", "reporter_notebook"]},
+        },
+        {
+            "notice_board": {"state": "posted", "location": "town_square", "affordances": ["read_notice"], "allowed_states": ["posted", "reviewed"]},
+            "town_map": {"state": "posted", "location": "town_square", "affordances": ["study_map"], "allowed_states": ["posted", "reviewed"]},
+            "archive_boxes": {"state": "untouched", "location": "archive_room", "affordances": ["search_records"], "allowed_states": ["untouched", "reviewed"]},
+            "map_table": {"state": "empty", "location": "archive_room", "affordances": ["study_map"], "allowed_states": ["empty", "reviewed"]},
+            "old_ledger": {"state": "closed", "location": "archive_room", "affordances": ["review_notes"], "allowed_states": ["closed", "reviewed"]},
+            "old_mill_wheel": {"state": "still", "location": "old_mill", "affordances": ["inspect"], "allowed_states": ["still", "inspected"]},
+            "market_crates": {"state": "stocked", "location": "market_stalls", "affordances": ["browse_market"], "allowed_states": ["stocked", "browsed"]},
+            "typewriter": {"state": "idle", "location": "newspaper_office", "affordances": ["write_article"], "allowed_states": ["idle", "in_use"]},
+            "clippings_wall": {"state": "posted", "location": "newspaper_office", "affordances": ["review_notes"], "allowed_states": ["posted", "reviewed"]},
+            "reporter_notebook": {"state": "closed", "location": "newspaper_office", "affordances": ["review_notes", "write"], "allowed_states": ["closed", "reviewed", "in_use"]},
+        },
+    )
+    agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+
+    cases = [
+        ("notice", "check the notice board", ["notice_board", "town_map"], "notice_board", "read_notice"),
+        ("old records", "look at old records", ["archive_boxes", "map_table", "old_ledger"], "archive_boxes", "search_records"),
+        ("map", "study the map", ["archive_boxes", "map_table", "old_ledger"], "map_table", "study_map"),
+        ("mill wheel", "inspect the mill wheel", ["old_mill_wheel"], "old_mill_wheel", "inspect"),
+        ("market crates", "browse the market stalls", ["market_crates"], "market_crates", "browse_market"),
+        ("article", "write article for the newspaper", ["typewriter", "clippings_wall"], "typewriter", "write_article"),
+        ("clippings", "review notes on the clipping wall", ["typewriter", "clippings_wall"], "clippings_wall", "review_notes"),
+        ("clippings_wall", "examine the clippings wall", ["typewriter", "clippings_wall"], "clippings_wall", "review_notes"),
+        ("reporter_notebook", "open the reporter notebook", ["typewriter", "reporter_notebook"], "reporter_notebook", "review_notes"),
+    ]
+
+    for target, interaction, objects_here, expected_object, expected_interaction in cases:
+        proposal = agent._proposal_from_dict(
+            {"action": "use_object", "target": target, "interaction": interaction},
+            objects_here=objects_here,
+        )
+        assert isinstance(proposal, UseObjectProposal)
+        assert proposal.object == expected_object
+        assert proposal.interaction == expected_interaction
+
+
+def test_agent_fallback_plans_use_broader_town_locations():
+    world = WorldState(
+        {
+            "cafe": {"objects": []},
+            "town_square": {"objects": []},
+            "market_stalls": {"objects": []},
+            "community_hall": {"objects": []},
+            "newspaper_office": {"objects": []},
+            "riverside_path": {"objects": []},
+            "archive_room": {"objects": []},
+            "old_mill": {"objects": []},
+            "library": {"objects": []},
+        },
+        {},
+    )
+    for name, expected_location in (
+        ("Maria", "town_square"),
+        ("John", "newspaper_office"),
+        ("Emma", "archive_room"),
+    ):
+        bio = {"id": 1, "name": name, "age": 30, "job": "local", "personality": "Grounded", "goals": []}
+        agent = Agent(bio, None, None, world, EventBus(), FakeTranscript())
+        plan_text = " ".join(agent._fallback_plan().values())
+        assert expected_location in plan_text
