@@ -2,7 +2,7 @@ import pytest
 
 from src.storage.db import get_connection, init_db
 from src.storage.repositories import AgentRepository, EventRepository, MemoryRepository, RelationshipRepository
-from src.world.events import SpeechEvent
+from src.world.events import MoveEvent, ObjectStateChangeEvent, RejectedActionEvent, SpeechEvent
 
 
 @pytest.mark.asyncio
@@ -40,5 +40,60 @@ async def test_repositories_create_and_retrieve(tmp_path):
         assert rel["id"] == rel_id
         assert rel["familiarity"] == 0.5
         assert "John:" in (await relationships.notes_for_agent(agent_id, {john_id: "John"}))[0]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_upsert_updates_provided_runtime_fields_and_preserves_omitted_fields(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    await init_db(str(db_path))
+    conn = await get_connection(str(db_path))
+    try:
+        agents = AgentRepository(conn)
+        agent_id = await agents.upsert(
+            "Maria",
+            {"name": "Maria", "role": "barista"},
+            "cafe",
+            state={"mood": "bright"},
+            needs={"hunger": 0.2},
+        )
+
+        await agents.upsert(
+            "Maria",
+            {"name": "Maria", "role": "host"},
+            "library",
+            state={"mood": "focused"},
+            needs={"hunger": 0.7},
+        )
+        row = await agents.get_by_name("Maria")
+        assert row["id"] == agent_id
+        assert row["current_location"] == "library"
+        assert await agents.get_state(agent_id) == {"mood": "focused"}
+        assert await agents.get_needs(agent_id) == {"hunger": 0.7}
+
+        await agents.upsert("Maria", {"name": "Maria", "role": "owner"})
+        row = await agents.get_by_name("Maria")
+        assert row["current_location"] == "library"
+        assert await agents.get_state(agent_id) == {"mood": "focused"}
+        assert await agents.get_needs(agent_id) == {"hunger": 0.7}
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_event_repository_attributes_agent_sources_when_mapping_is_available(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    await init_db(str(db_path))
+    conn = await get_connection(str(db_path))
+    try:
+        events = EventRepository(conn, {"Maria": 1, "John": 2})
+        await events.append(SpeechEvent("Maria", "John", "cafe", "Good morning.", 1), "08:00")
+        await events.append(MoveEvent("John", "library", "cafe", "cafe", 1), "08:00")
+        await events.append(RejectedActionEvent("Maria", "move", "unknown location", "cafe", 1), "08:00")
+        await events.append(ObjectStateChangeEvent("coffee_maker", "ready", "brewing", "cafe", 1), "08:00")
+
+        rows = await events.get_by_tick(1)
+        assert [row["source_agent_id"] for row in rows] == [1, 2, 1, None]
     finally:
         await conn.close()

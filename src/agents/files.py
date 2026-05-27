@@ -38,7 +38,16 @@ class AgentFiles:
         }
 
     def append_knowledge(self, bio: dict, lines: list[str], sim_time: str = "") -> None:
-        clean = [line.strip() for line in lines if isinstance(line, str) and line.strip()]
+        clean = []
+        seen = self._existing_knowledge_keys(bio)
+        for line in lines:
+            if not isinstance(line, str) or not line.strip():
+                continue
+            key = self._dedupe_key(line)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            clean.append(line.strip())
         if not clean:
             return
         self.ensure(bio)
@@ -79,3 +88,14 @@ class AgentFiles:
             "## Goals\n"
             f"{goals}\n"
         )
+
+    def _existing_knowledge_keys(self, bio: dict) -> set[str]:
+        self.ensure(bio)
+        path = self.folder(bio["name"]) / "KNOWLEDGE.md"
+        return {self._dedupe_key(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+    def _dedupe_key(self, line: str) -> str:
+        words = re.findall(r"[a-z0-9']+", line.lower())
+        if words and words[0] in {"-", "##"}:
+            words = words[1:]
+        return " ".join(words[:24])

@@ -48,7 +48,10 @@ def _is_postgres_url(value: str) -> bool:
 
 async def _ensure_sqlite_columns(conn) -> None:
     await _add_column_if_missing(conn, "agents", "state_json", "TEXT DEFAULT '{}'")
+    await _add_column_if_missing(conn, "agents", "needs_json", "TEXT DEFAULT '{}'")
     await _add_column_if_missing(conn, "memories", "metadata_json", "TEXT DEFAULT '{}'")
+    await _add_column_if_missing(conn, "memories", "consolidated", "INTEGER NOT NULL DEFAULT 0")
+    await _add_column_if_missing(conn, "plans", "sim_day", "INTEGER NOT NULL DEFAULT 0")
 
 
 async def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:

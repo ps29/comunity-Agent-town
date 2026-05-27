@@ -1,9 +1,10 @@
 import numpy as np
 import pytest
 
+from src.cognition import embeddings
 from src.cognition.memory import MemoryService
 from src.storage.db import get_connection, init_db
-from src.storage.repositories import AgentRepository, MemoryRepository
+from src.storage.repositories import AgentRepository, MemoryRepository, SemanticMemoryRepository
 
 
 class TinyEmbeddings:
@@ -88,3 +89,70 @@ async def test_memory_retrieval_uses_bounded_candidates():
     results = await service.retrieve(1, "coffee", 11)
     assert repo.used_candidates
     assert results[0]["content"] == "Coffee memory"
+
+
+class InvalidEmbeddingRepo:
+    async def get_retrieval_candidates(self, agent_id, recent_n=80, important_n=80):
+        return [
+            {
+                "id": 1,
+                "agent_id": agent_id,
+                "sim_tick": 10,
+                "kind": "observation",
+                "content": "Coffee memory",
+                "importance": 8,
+                "embedding": b"",
+                "metadata_json": "{}",
+            }
+        ]
+
+
+@pytest.mark.asyncio
+async def test_memory_retrieval_falls_back_when_stored_embedding_is_invalid():
+    service = MemoryService(InvalidEmbeddingRepo(), TinyEmbeddings)
+    results = await service.retrieve(1, "coffee", 11)
+    assert results[0]["content"] == "Coffee memory"
+    assert service.embedding_blob_fallbacks == 1
+
+
+def test_embedding_hash_fallback_is_visible(monkeypatch, caplog):
+    def fail_model_load():
+        raise RuntimeError("model cache missing")
+
+    monkeypatch.setattr(embeddings, "get_model", fail_model_load)
+    monkeypatch.setattr(embeddings, "_hash_fallback_used", False)
+    monkeypatch.setattr(embeddings, "_hash_fallback_reason", None)
+    monkeypatch.setattr(embeddings, "_hash_fallback_warned", False)
+
+    with caplog.at_level("WARNING"):
+        vector = embeddings.embed("coffee memory")
+
+    assert vector.shape == (384,)
+    assert embeddings.diagnostics()["hash_fallback_used"] is True
+    assert "model cache missing" in embeddings.diagnostics()["hash_fallback_reason"]
+    assert "Falling back to deterministic hash embeddings" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_can_be_added_and_retrieved(tmp_path):
+    db_path = tmp_path / "test.sqlite3"
+    await init_db(str(db_path))
+    conn = await get_connection(str(db_path))
+    try:
+        agent_id = await AgentRepository(conn).create("Maria", {"name": "Maria"}, "cafe")
+        service = MemoryService(MemoryRepository(conn), TinyEmbeddings, semantic_repo=SemanticMemoryRepository(conn))
+
+        fact_id = await service.add_semantic(
+            agent_id,
+            "John",
+            "John prefers thoughtful questions about his novel.",
+            0.7,
+            [1, 2],
+            48,
+        )
+
+        facts = await service.get_semantic_about(agent_id, "John")
+        assert fact_id == facts[0]["id"]
+        assert facts[0]["fact"] == "John prefers thoughtful questions about his novel."
+    finally:
+        await conn.close()

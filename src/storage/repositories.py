@@ -12,7 +12,21 @@ def _json_dict(value: Any) -> dict:
         return value
     if not value:
         return {}
-    return json.loads(value)
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _json_list(value: Any) -> list:
+    if isinstance(value, list):
+        return value
+    if not value:
+        return []
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 class MemoryRepository:
@@ -75,6 +89,9 @@ class MemoryRepository:
             by_id[memory["id"]] = memory
         return sorted(by_id.values(), key=lambda row: (row["sim_tick"], row["id"]), reverse=True)
 
+    async def get_candidates(self, agent_id: int, max_rows: int = 200) -> list[dict]:
+        return await self.get_retrieval_candidates(agent_id, max_rows // 2 or 50, max_rows // 2 or 50)
+
     async def get_by_kind(self, agent_id: int, kind: str, n: int = 10) -> list[dict]:
         cur = await self.conn.execute(
             """
@@ -85,6 +102,134 @@ class MemoryRepository:
             (agent_id, kind, n),
         )
         return [dict(r) for r in await cur.fetchall()]
+
+    async def retrieve_about(self, agent_id: int, subject: str, n: int = 5) -> list[dict]:
+        cur = await self.conn.execute(
+            """
+            SELECT * FROM memories
+            WHERE agent_id = ? AND content LIKE ?
+            ORDER BY importance DESC, sim_tick DESC LIMIT ?
+            """,
+            (agent_id, f"%{subject}%", n),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def recent_speech_to(self, agent_id: int, target_name: str, n: int = 3) -> list[str]:
+        cur = await self.conn.execute(
+            """
+            SELECT content FROM memories
+            WHERE agent_id = ? AND kind = 'dialogue' AND content LIKE ?
+            ORDER BY sim_tick DESC, id DESC LIMIT ?
+            """,
+            (agent_id, f"%I said to {target_name}%", n),
+        )
+        return [row["content"] for row in await cur.fetchall()]
+
+    async def get_today(self, agent_id: int, current_tick: int, window: int = 48) -> list[dict]:
+        cutoff = max(0, current_tick - window)
+        cur = await self.conn.execute(
+            """
+            SELECT * FROM memories
+            WHERE agent_id = ? AND sim_tick > ? AND consolidated = 0
+            ORDER BY sim_tick ASC, id ASC
+            """,
+            (agent_id, cutoff),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def mark_consolidated(self, memory_ids: list[int]) -> None:
+        if not memory_ids:
+            return
+        placeholders = ",".join("?" for _ in memory_ids)
+        await self.conn.execute(
+            f"UPDATE memories SET consolidated = 1 WHERE id IN ({placeholders})",
+            tuple(memory_ids),
+        )
+        await self.conn.commit()
+
+
+class SemanticMemoryRepository:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def add(
+        self,
+        agent_id: int,
+        subject: str,
+        fact: str,
+        confidence: float,
+        source_memory_ids: list[int],
+        sim_tick: int,
+    ) -> int:
+        cur = await self.conn.execute(
+            """
+            INSERT INTO semantic_memory
+            (agent_id, subject, fact, confidence, source_memory_ids, first_seen_tick, last_reinforced_tick)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                agent_id,
+                subject,
+                fact,
+                max(0.0, min(1.0, float(confidence))),
+                json.dumps(source_memory_ids),
+                sim_tick,
+                sim_tick,
+            ),
+        )
+        await self.conn.commit()
+        return int(cur.lastrowid)
+
+    async def reinforce(self, fact_id: int, sim_tick: int, delta: float = 0.1) -> None:
+        cur = await self.conn.execute("SELECT confidence FROM semantic_memory WHERE id = ?", (fact_id,))
+        row = await cur.fetchone()
+        if row is None:
+            return
+        confidence = min(1.0, float(row["confidence"]) + delta)
+        await self.conn.execute(
+            "UPDATE semantic_memory SET confidence = ?, last_reinforced_tick = ? WHERE id = ?",
+            (confidence, sim_tick, fact_id),
+        )
+        await self.conn.commit()
+
+    async def get_for_agent(self, agent_id: int, min_confidence: float = 0.0) -> list[dict]:
+        cur = await self.conn.execute(
+            """
+            SELECT * FROM semantic_memory
+            WHERE agent_id = ? AND decayed = 0 AND confidence >= ?
+            ORDER BY confidence DESC, last_reinforced_tick DESC
+            """,
+            (agent_id, min_confidence),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def get_about_subject(self, agent_id: int, subject: str, n: int = 10) -> list[dict]:
+        cur = await self.conn.execute(
+            """
+            SELECT * FROM semantic_memory
+            WHERE agent_id = ? AND subject = ? AND decayed = 0
+            ORDER BY confidence DESC LIMIT ?
+            """,
+            (agent_id, subject, n),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def find_similar(self, agent_id: int, subject: str, fact: str) -> dict | None:
+        cur = await self.conn.execute(
+            """
+            SELECT * FROM semantic_memory
+            WHERE agent_id = ? AND subject = ? AND decayed = 0
+            ORDER BY confidence DESC, last_reinforced_tick DESC
+            """,
+            (agent_id, subject),
+        )
+        fact_key = _semantic_key(fact)
+        for row in await cur.fetchall():
+            row_dict = dict(row)
+            existing_key = _semantic_key(row_dict.get("fact", ""))
+            if fact_key and (fact_key == existing_key or fact_key in existing_key or existing_key in fact_key):
+                return row_dict
+        return None
 
 
 class AgentRepository:
@@ -97,10 +242,11 @@ class AgentRepository:
         bio: dict,
         current_location: str | None = None,
         state: dict | None = None,
+        needs: dict | None = None,
     ) -> int:
         cur = await self.conn.execute(
-            "INSERT INTO agents (name, bio_json, state_json, current_location) VALUES (?, ?, ?, ?)",
-            (name, json.dumps(bio), json.dumps(state or {}), current_location),
+            "INSERT INTO agents (name, bio_json, state_json, needs_json, current_location) VALUES (?, ?, ?, ?, ?)",
+            (name, json.dumps(bio), json.dumps(state or {}), json.dumps(needs or {}), current_location),
         )
         await self.conn.commit()
         return int(cur.lastrowid)
@@ -111,20 +257,41 @@ class AgentRepository:
         bio: dict,
         current_location: str | None = None,
         state: dict | None = None,
+        needs: dict | None = None,
     ) -> int:
-        await self.conn.execute(
+        existing = await self.get_by_name(name)
+        if existing:
+            await self.conn.execute(
+                """
+                UPDATE agents
+                SET bio_json = ?,
+                    state_json = ?,
+                    needs_json = ?,
+                    current_location = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(bio),
+                    existing["state_json"] if state is None else json.dumps(state),
+                    existing["needs_json"] if needs is None else json.dumps(needs),
+                    existing["current_location"] if current_location is None else current_location,
+                    existing["id"],
+                ),
+            )
+            await self.conn.commit()
+            return int(existing["id"])
+
+        cur = await self.conn.execute(
             """
-            INSERT INTO agents (name, bio_json, state_json, current_location)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET bio_json = excluded.bio_json
+            INSERT INTO agents (name, bio_json, state_json, needs_json, current_location)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (name, json.dumps(bio), json.dumps(state or {}), current_location),
+            (name, json.dumps(bio), json.dumps(state or {}), json.dumps(needs or {}), current_location),
         )
         await self.conn.commit()
-        row = await self.get_by_name(name)
-        if row is None:
+        if cur.lastrowid is None:
             raise RuntimeError(f"Agent upsert failed for {name}")
-        return int(row["id"])
+        return int(cur.lastrowid)
 
     async def get_by_name(self, name: str) -> dict | None:
         cur = await self.conn.execute("SELECT * FROM agents WHERE name = ?", (name,))
@@ -145,15 +312,29 @@ class AgentRepository:
         await self.conn.execute("UPDATE agents SET state_json = ? WHERE id = ?", (json.dumps(state), agent_id))
         await self.conn.commit()
 
+    async def get_needs(self, agent_id: int) -> dict:
+        cur = await self.conn.execute("SELECT needs_json FROM agents WHERE id = ?", (agent_id,))
+        row = await cur.fetchone()
+        return _json_dict(row["needs_json"]) if row else {}
+
+    async def update_needs(self, agent_id: int, needs: dict) -> None:
+        await self.conn.execute("UPDATE agents SET needs_json = ? WHERE id = ?", (json.dumps(needs), agent_id))
+        await self.conn.commit()
+
 
 class EventRepository:
-    def __init__(self, conn):
+    def __init__(self, conn, agent_ids_by_name: dict[str, int] | None = None):
         self.conn = conn
+        self.agent_ids_by_name = agent_ids_by_name or {}
+
+    def set_agent_ids_by_name(self, agent_ids_by_name: dict[str, int]) -> None:
+        self.agent_ids_by_name = dict(agent_ids_by_name)
 
     async def append(self, event, sim_time: str = "") -> int:
         payload = asdict(event) if is_dataclass(event) else dict(event)
         kind = event.__class__.__name__.replace("Event", "").lower()
         source_name = payload.get("speaker") or payload.get("agent")
+        source_agent_id = self._source_agent_id(source_name)
         cur = await self.conn.execute(
             """
             INSERT INTO world_events
@@ -165,12 +346,18 @@ class EventRepository:
                 sim_time,
                 kind,
                 json.dumps(payload),
-                None if source_name is None else None,
+                source_agent_id,
                 payload.get("location") or payload.get("to_location"),
             ),
         )
         await self.conn.commit()
         return int(cur.lastrowid)
+
+    def _source_agent_id(self, source_name: str | None) -> int | None:
+        if not source_name:
+            return None
+        agent_id = self.agent_ids_by_name.get(source_name)
+        return int(agent_id) if agent_id is not None else None
 
     async def get_by_tick(self, tick: int) -> list[dict]:
         cur = await self.conn.execute("SELECT * FROM world_events WHERE sim_tick = ? ORDER BY id", (tick,))
@@ -195,10 +382,10 @@ class RelationshipRepository:
         existing = await self.get(source_agent_id, target_agent_id)
         if existing:
             values = {
-                "affinity": float(existing["affinity"]) + affinity_delta,
-                "trust": float(existing["trust"]) + trust_delta,
-                "familiarity": float(existing["familiarity"]) + familiarity_delta,
-                "tension": float(existing["tension"]) + tension_delta,
+                "affinity": _clamp(float(existing["affinity"]) + affinity_delta),
+                "trust": _clamp(float(existing["trust"]) + trust_delta),
+                "familiarity": _clamp(float(existing["familiarity"]) + familiarity_delta),
+                "tension": _clamp(float(existing["tension"]) + tension_delta),
                 "summary": summary or existing["summary"],
                     "metadata": {**_json_dict(existing["metadata_json"]), **(metadata or {})},
             }
@@ -231,10 +418,10 @@ class RelationshipRepository:
             (
                 source_agent_id,
                 target_agent_id,
-                affinity_delta,
-                trust_delta,
-                familiarity_delta,
-                tension_delta,
+                _clamp(affinity_delta),
+                _clamp(trust_delta),
+                _clamp(familiarity_delta),
+                _clamp(tension_delta),
                 summary,
                 json.dumps(metadata or {}),
             ),
@@ -265,14 +452,29 @@ class RelationshipRepository:
         return notes
 
 
+def _clamp(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, value))
+
+
+def _semantic_key(text: str) -> str:
+    import re
+
+    stop = {
+        "the", "and", "that", "with", "from", "this", "into", "about",
+        "consistent", "consistently", "frequent", "frequently", "suggests",
+    }
+    words = [word for word in re.findall(r"[a-z0-9']+", str(text).lower()) if word not in stop]
+    return " ".join(words[:18])
+
+
 class PlanRepository:
     def __init__(self, conn):
         self.conn = conn
 
-    async def add(self, agent_id: int, plan: dict, sim_tick: int, sim_time: str, status: str = "active") -> int:
+    async def add(self, agent_id: int, plan: dict, sim_tick: int, sim_time: str, status: str = "active", sim_day: int = 0) -> int:
         cur = await self.conn.execute(
-            "INSERT INTO plans (agent_id, sim_tick, sim_time, status, plan_json) VALUES (?, ?, ?, ?, ?)",
-            (agent_id, sim_tick, sim_time, status, json.dumps(plan)),
+            "INSERT INTO plans (agent_id, sim_tick, sim_time, sim_day, status, plan_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (agent_id, sim_tick, sim_time, sim_day, status, json.dumps(plan)),
         )
         await self.conn.commit()
         return int(cur.lastrowid)

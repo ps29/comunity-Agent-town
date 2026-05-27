@@ -31,6 +31,10 @@ def parse_json_forgiving(text: str | None, fallback: dict | None = None) -> dict
         except json.JSONDecodeError:
             pass
 
+    partial = _partial_object_fields(cleaned)
+    if partial:
+        return partial
+
     return fallback
 
 
@@ -60,3 +64,16 @@ def _first_balanced_object(text: str) -> str | None:
             if depth == 0:
                 return text[start : idx + 1]
     return None
+
+
+def _partial_object_fields(text: str) -> dict:
+    start = text.find("{")
+    if start >= 0:
+        text = text[start:]
+    fields = {}
+    for key, value in re.findall(r'"([^"{}:,]+)"\s*:\s*"((?:\\.|[^"\\])*)"', text):
+        try:
+            fields[key] = json.loads(f'"{value}"')
+        except json.JSONDecodeError:
+            fields[key] = value
+    return fields

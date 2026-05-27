@@ -15,6 +15,15 @@ AFFORDANCE_STATE_MAP = {
     "browse": "in_use",
     "rest": "occupied",
     "observe": "observed",
+    "read_notice": "reviewed",
+    "post_notice": "posted",
+    "search_records": "reviewed",
+    "study_map": "reviewed",
+    "inspect": "inspected",
+    "browse_market": "browsed",
+    "host_meeting": "in_use",
+    "write_article": "in_use",
+    "review_notes": "reviewed",
 }
 
 
